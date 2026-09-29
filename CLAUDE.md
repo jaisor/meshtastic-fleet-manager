@@ -128,6 +128,7 @@ src/web/
   components/  Backdrop, Layout, StatusDot, SignalDot, CapabilityBadge, format.ts
   pages/       Login, Fleet, NodeDetail
   pages/fleetOrdering.ts   pure filter + comparator logic for the fleet list
+  pages/fleetView.ts       the list's search/sort selections, persisted per tab
 ```
 
 Keep the mesh layer free of HTTP concerns and the routes free of protobuf concerns. The
@@ -535,6 +536,17 @@ bloom over near-black.
   nodes that never reported one; and **every comparison tie-breaks on `nodeNum`**, because
   the list refetches every 20s and equal rows would otherwise swap under the pointer.
   Each sort key also carries its own default direction, applied when the key is selected.
+- **The search and sort selections persist in `sessionStorage`** (`pages/fleetView.ts`),
+  because opening a node unmounts `Fleet` entirely and resetting the filter at exactly the
+  moment someone drills in and comes back is the wrong behavior. `sessionStorage` rather
+  than `localStorage`: it is a working view, scoped to the tab and dropped when it closes,
+  and it still survives the full reload that a deep link like `/nodes/!a4c138f0` triggers
+  through the SPA fallback.
+  **Every stored field is validated on read.** A `sortKey` that no longer exists would
+  otherwise reach `valueFor`, whose switch is exhaustive over `SortKey`, returning
+  `undefined` and sorting the list by `NaN`. Reads and writes are both wrapped: storage can
+  simply throw in a private window or with site data blocked, and the list has to render
+  anyway — it just stops remembering.
 - **Mesh writes are never optimistic.** Every remote operation is a row in
   `admin_operations` with pending → confirmed | failed, surfaced in the UI. Pending rows
   are failed at startup, since they belong to a dead process with no waiter.

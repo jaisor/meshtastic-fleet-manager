@@ -17,6 +17,7 @@ import {
   type SortDirection,
   type SortKey,
 } from "./fleetOrdering";
+import { loadFleetView, saveFleetView } from "./fleetView";
 
 /** Poll cadence. The mesh is slow; refreshing faster would show nothing new. */
 const REFRESH_MS = 20_000;
@@ -24,9 +25,17 @@ const REFRESH_MS = 20_000;
 export function Fleet({ onOpen }: { onOpen: (path: string) => void }) {
   const [nodes, setNodes] = useState<FleetNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [sortKey, setSortKey] = useState<SortKey>("name");
-  const [direction, setDirection] = useState<SortDirection>("asc");
+  // Seeded from sessionStorage so the view survives a trip into a node's
+  // detail page, which unmounts this component entirely.
+  const [view, setView] = useState(loadFleetView);
+  const { query, sortKey, direction } = view;
+
+  useEffect(() => {
+    saveFleetView(view);
+  }, [view]);
+
+  const setQuery = (value: string) =>
+    setView((current) => ({ ...current, query: value }));
 
   useEffect(() => {
     let cancelled = false;
@@ -94,14 +103,20 @@ export function Fleet({ onOpen }: { onOpen: (path: string) => void }) {
         onQueryChange={setQuery}
         sortKey={sortKey}
         direction={direction}
-        onSortKeyChange={(key) => {
-          setSortKey(key);
-          // Each key has a direction that answers the usual question first,
-          // so adopt it rather than carrying the previous key's over.
-          setDirection(sortOption(key).defaultDirection);
-        }}
+        onSortKeyChange={(key) =>
+          setView((current) => ({
+            ...current,
+            sortKey: key,
+            // Each key has a direction that answers the usual question
+            // first, so adopt it rather than carrying the previous one over.
+            direction: sortOption(key).defaultDirection,
+          }))
+        }
         onToggleDirection={() =>
-          setDirection((current) => (current === "asc" ? "desc" : "asc"))
+          setView((current) => ({
+            ...current,
+            direction: current.direction === "asc" ? "desc" : "asc",
+          }))
         }
       />
 
