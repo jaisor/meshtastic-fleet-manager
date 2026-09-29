@@ -412,7 +412,19 @@ Failed logins sleep ~750ms before replying, which is the whole of the rate limit
 - Runs as the `node` user. `/config` and `/data` are created and chowned in the image so a
   bind mount of an empty host directory does not land root-owned and unwritable.
 - `/data` must be a writable **directory**, not a single-file mount: WAL creates `-wal`
-  and `-shm` siblings.
+  and `-shm` siblings. Bind-mounting `...:/data/fleet.db` fails with "attempt to write a
+  readonly database".
+- **`compose.yaml` pins `name: meshtastic-fleet-manager`.** Without it Compose names the
+  project after the directory holding the file — literally `docker` — and the database
+  volume becomes `docker_fleet-data`, which collides with any other project laid out the
+  same way. Changing the project name later points Compose at a *different* volume: the old
+  data is orphaned rather than lost, and has to be copied across by hand.
+- The database defaults to the named volume `meshtastic-fleet-manager_fleet-data`. On
+  Docker Desktop its mountpoint is inside the Linux VM and is **not** reachable from the
+  host — there is no `docker-desktop-data` WSL distro to browse. Reach it through a
+  throwaway container instead. `compose.yaml` documents the bind-mount alternative for
+  keeping the database in an ordinary host folder; that path is verified, including WAL
+  siblings and host-side readability on Docker Desktop for Windows.
 - The healthcheck reads `/api/status` and accepts 401 as healthy. It deliberately does not
   assert the radio is connected — an unplugged radio is a condition to display, not a
   reason to kill the container and lose the history already collected.
