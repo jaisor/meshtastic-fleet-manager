@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# The real config holds the console password; only the example is tracked.
+config/config.yaml
+
+# Local database files, if anyone points database.path at the repo.
+*.db
+*.db-wal
+*.db-shm
+
+.DS_Store
+*.log

@@ -1,0 +1,35 @@
+services:
+  fleet-manager:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: meshtastic-fleet-manager
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      # The config is read once at startup; a change needs a restart.
+      - ../config/config.yaml:/config/config.yaml:ro
+      # A named volume, not a bind mount of a single file: WAL mode writes
+      # `fleet.db-wal` and `fleet.db-shm` next to the database, so the
+      # directory has to be writable.
+      - fleet-data:/data
+
+    devices:
+      # Prefer the stable by-id path over /dev/ttyUSB0, which renumbers on
+      # replug. List yours with:  ls -l /dev/serial/by-id/
+      # The path inside the container must match serial.port in config.yaml.
+      - "/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXXXXXX-if00:/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXXXXXX-if00"
+
+    group_add:
+      # The container runs as the unprivileged `node` user, which needs the
+      # host's serial group to open the device. Find the numeric GID with:
+      #   getent group dialout | cut -d: -f3
+      # On most Debian/Ubuntu hosts this is 20; on Fedora/Arch the group is
+      # `uucp`. A wrong value here shows up as EACCES on the serial port.
+      - "20"
+
+volumes:
+  fleet-data:

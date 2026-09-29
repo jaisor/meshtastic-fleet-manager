@@ -1,0 +1,72 @@
+# Meshtastic Fleet Manager configuration.
+#
+# Mount this file into the container at /config/config.yaml, or point the
+# MFM_CONFIG environment variable at it when running outside Docker.
+#
+# Every value below is optional except auth: the server refuses to start
+# on an invalid config rather than coming up half-configured.
+
+server:
+  host: 0.0.0.0
+  port: 8080
+
+  # Signs the session cookie. Generate with:
+  #   openssl rand -hex 32
+  # Omitting it works, but a new one is generated on every restart, which
+  # logs everyone out when the process restarts.
+  session_secret: "CHANGE-ME-32-bytes-of-random-hex"
+
+  session_ttl: 12h
+
+  # Marks the session cookie Secure. Set true ONLY when the UI is reached
+  # over HTTPS -- browsers drop Secure cookies on a plain-HTTP origin, and
+  # the symptom is a login form that appears to do nothing.
+  secure_cookies: false
+
+auth:
+  # Exactly one of password / password_hash.
+  #
+  # Plaintext is hashed at load time and never written to the database or
+  # a log line, but it is still sitting in a file -- prefer password_hash
+  # if anything else can read this file. Generate one with:
+  #   node -e "import('./dist/server/config.js').then(m=>console.log(m.hashPassword('your-password')))"
+  password: "change-me"
+  # password_hash: "scrypt$<salt-hex>$<hash-hex>"
+
+serial:
+  # Path to the USB-attached local Meshtastic node, or "auto" to pick the
+  # first device with a known Meshtastic USB vendor ID.
+  #
+  # Prefer a by-id path: /dev/ttyUSB0 renumbers on replug, and with two
+  # radios attached "the first one" is not stable.
+  port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXXXXXX-if00
+  baud: 115200
+
+  # Seconds between reconnect attempts; the last value repeats forever.
+  reconnect_backoff: [1s, 2s, 5s, 15s, 60s]
+
+  # Set false to run the UI with no radio attached (useful for development).
+  enabled: true
+
+database:
+  # The DIRECTORY must be writable, not just the file: WAL mode creates
+  # -wal and -shm siblings next to it.
+  path: /data/fleet.db
+
+fleet:
+  # A node heard within this window is "online".
+  stale_after: 6h
+  # Past this it is "offline" rather than merely stale.
+  offline_after: 24h
+
+  # How often to re-establish whether the local node may administer each
+  # remote node. Each probe is a real LoRa round trip, so keep it slow.
+  admin_probe_interval: 24h
+  admin_probe_timeout: 30s
+
+  # Telemetry and position history older than this is pruned. Unbounded
+  # growth on a Raspberry Pi's SD card is a real failure mode.
+  telemetry_retention: 30d
+
+logging:
+  level: info

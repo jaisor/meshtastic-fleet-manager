@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.gitignore
+*.md
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+# Never bake the real config into an image: it is mounted at runtime.
+config/config.yaml

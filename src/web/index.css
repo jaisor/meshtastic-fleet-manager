@@ -1,0 +1,55 @@
+/*
+ * Theme carried over from jaisor.net so the two read as one system:
+ * Space Grotesk, near-black neutrals, a single amber accent, hairline
+ * borders and beveled corners.
+ *
+ * The font is bundled rather than pulled from Google Fonts -- a mesh
+ * fleet manager is exactly the kind of thing that runs on a Pi with no
+ * internet, and a webfont that 404s there would silently fall back.
+ */
+@import "tailwindcss";
+@import "@fontsource/space-grotesk/400.css";
+@import "@fontsource/space-grotesk/500.css";
+@import "@fontsource/space-grotesk/600.css";
+@import "@fontsource/space-grotesk/700.css";
+
+@theme {
+  --font-sans: "Space Grotesk", system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+/*
+ * The site's card surface. `corner-shape` is written as plain CSS because
+ * it is the signature and degrades to plain rounded corners wherever it
+ * is unsupported.
+ */
+@utility card {
+  @apply rounded-xl border border-neutral-800 bg-neutral-900/50 shadow-sm shadow-black/20;
+  corner-shape: bevel;
+}
+
+/** The hover lift. Add alongside `card` when the card is a link. */
+@utility card-link {
+  @apply transition;
+
+  &:hover {
+    @apply border-amber-500/40 shadow-md shadow-black/30;
+  }
+}
+
+/** Node IDs, telemetry values and coordinates. Tabular so columns line up. */
+@utility data {
+  @apply font-mono tabular-nums;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-neutral-950 text-neutral-300;
+}
+
+/* Keyboard focus stays visible everywhere; amber is the accent for it. */
+:focus-visible {
+  @apply outline-2 outline-offset-2 outline-amber-500/70;
+}
