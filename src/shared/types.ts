@@ -130,6 +130,19 @@ export interface RadioStatus {
  */
 export type RadioTaskKind = "probe" | "config";
 
+/**
+ * What the discovery policy currently admits. Surfaced so an empty fleet
+ * can say "nothing has matched yet" rather than the misleading "no nodes
+ * have been heard" -- the difference between a quiet mesh and a filter
+ * that is excluding everything.
+ */
+export interface DiscoverySummary {
+  /** False when the default "admit anything heard" policy is in force. */
+  restricted: boolean;
+  /** Human phrasing of the criteria, e.g. `channel 2, message containing "join"`. */
+  description: string;
+}
+
 export interface RadioTask {
   id: number;
   kind: RadioTaskKind;

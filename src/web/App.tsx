@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import type { RadioStatus, RadioTask } from "../shared/types";
+import type {
+  DiscoverySummary,
+  RadioStatus,
+  RadioTask,
+} from "../shared/types";
 import { api, ApiError } from "./api";
 import { useRoute } from "./router";
 import { Backdrop } from "./components/Backdrop";
@@ -24,6 +28,7 @@ export function App() {
   const [auth, setAuth] = useState<Auth>("checking");
   const [radio, setRadio] = useState<RadioStatus | null>(null);
   const [tasks, setTasks] = useState<RadioTask[]>([]);
+  const [discovery, setDiscovery] = useState<DiscoverySummary | null>(null);
   const [route, navigate] = useRoute();
 
   useEffect(() => {
@@ -45,6 +50,7 @@ export function App() {
         if (cancelled) return;
         setRadio(status.radio);
         setTasks(status.tasks);
+        setDiscovery(status.discovery);
         // Reschedule from the response rather than on a fixed interval, so
         // the cadence follows whether the radio is actually busy.
         timer = setTimeout(
@@ -128,7 +134,7 @@ export function App() {
             radioConnected={radio?.connected ?? false}
           />
         ) : (
-          <Fleet onOpen={navigate} />
+          <Fleet onOpen={navigate} discovery={discovery} />
         )}
       </Layout>
     </>

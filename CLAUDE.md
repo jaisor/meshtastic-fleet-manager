@@ -22,7 +22,9 @@ and remotely reconfiguring them.
 **Core flows**
 
 1. **Discovery (passive).** The background listener consumes packets from the local node.
-   Any node heard on the primary channel becomes a fleet member — no manual enrollment.
+   By default any node it hears becomes a fleet member — no manual enrollment. The
+   `discovery` config section narrows that by channel, by requiring a text message, and by
+   requiring a substring in it; see §11.
 2. **State tracking.** Node identity, last check-in, telemetry, and position persist in
    SQLite so history survives restarts and the UI is useful before any new packet arrives.
 3. **Admin-capability probe.** For each known node, determine whether the local node is
@@ -119,7 +121,8 @@ src/server/
   mesh/
     nodeId.ts                nodeNum <-> "!hex" conversion
     listener.ts              serial connect, reconnect/backoff, event fan-out
-    ingest.ts                packet -> repository writes
+    ingest.ts                packet -> repository writes, behind the discovery gate
+    discovery.ts             pure admission rules
     admin.ts                 AdminMessage build/send/correlate, session passkey
     capability.ts            periodic admin probe sweep
     tasks.ts                 registry of user-initiated operations + cancellation
@@ -549,6 +552,20 @@ bloom over near-black.
   `undefined` and sorting the list by `NaN`. Reads and writes are both wrapped: storage can
   simply throw in a private window or with site data blocked, and the list has to render
   anyway — it just stops remembering.
+- **Discovery rules gate admission, not updates** (`mesh/discovery.ts`, applied in
+  `ingest.ts`). Once a node is in the fleet it is tracked normally whatever arrives next —
+  a node admitted by sending "JOIN" on channel 2 would otherwise never record telemetry,
+  since that is not a message and carries no matching text. The gate sits in front of every
+  handler, so an excluded node leaves no trace at all, not even a bare row.
+  **The radio's NodeDB dump is filtered too.** On connect the radio hands over everything it
+  has ever heard; letting that through would admit the whole mesh on first run, which is
+  exactly when a restrictive policy matters. `onNodeInfoPacket` therefore goes through the
+  same gate and a policy requiring a message rejects the lot.
+  **The local node is never a discovery candidate** — it is the instrument, not a finding.
+  Missing evidence counts as *not* matching: a packet carrying no channel fails a channel
+  rule rather than passing it, since admitting on absent information silently widens the
+  policy. `/api/status` carries a `discovery` summary so an empty fleet can distinguish a
+  quiet mesh from a filter excluding everything.
 - **Every user-initiated mesh operation registers a task** (`mesh/tasks.ts`) so the UI can
   say what the radio is busy with, from any page, and offer a way out. A mesh round trip
   runs to tens of seconds and the operator has usually navigated elsewhere by then, so a

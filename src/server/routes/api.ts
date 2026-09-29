@@ -6,6 +6,7 @@ import { AdminError, type AdminClient } from "../mesh/admin.js";
 import type { CapabilityProber } from "../mesh/capability.js";
 import type { MeshListener } from "../mesh/listener.js";
 import { TaskCancelledError, type RadioTaskRegistry } from "../mesh/tasks.js";
+import { describeRules, isRestricted } from "../mesh/discovery.js";
 import { parseNodeId } from "../mesh/nodeId.js";
 import type { NodeConfigUpdate } from "../../shared/types.js";
 
@@ -40,6 +41,10 @@ export function registerApiRoutes(
     // Polled by the UI to drive the "radio busy" banner, so this endpoint
     // is also what makes a long operation visible from any page.
     tasks: deps.tasks.list(),
+    discovery: {
+      restricted: isRestricted(deps.config.discoveryRules),
+      description: describeRules(deps.config.discoveryRules),
+    },
   }));
 
   /**

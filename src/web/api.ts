@@ -4,6 +4,7 @@ import type {
   FleetNode,
   NodeConfigUpdate,
   PositionPoint,
+  DiscoverySummary,
   RadioStatus,
   RadioTask,
   TelemetryPoint,
@@ -55,6 +56,7 @@ export interface StatusResponse {
   staleAfter: number;
   /** User-initiated operations currently occupying the radio. */
   tasks: RadioTask[];
+  discovery: DiscoverySummary;
 }
 
 export interface NodeDetailResponse {

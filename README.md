@@ -6,7 +6,8 @@ One Meshtastic node connects to the host over USB. The service listens on that n
 primary channel, records every other node it hears in SQLite, and serves a password-gated
 web console for viewing their state and remotely reconfiguring them.
 
-- **Passive discovery.** Nodes appear as the local radio hears them. No enrollment step.
+- **Passive discovery.** Nodes appear as the local radio hears them. No enrollment step —
+  and optionally narrowed to a channel, to nodes that send a message, or to a keyword in it.
 - **Persistent state.** Identity, telemetry, and position survive restarts, so the console
   is useful before the next packet arrives.
 - **Admin-capability probing.** Establishes which nodes accept admin messages from the

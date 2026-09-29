@@ -79,7 +79,7 @@ async function main(): Promise<void> {
     enabled: config.serial.enabled,
     logger: app.log,
   });
-  attachIngest(listener, nodes, app.log);
+  attachIngest(listener, nodes, config.discoveryRules, app.log);
 
   const admin = new AdminClient({
     listener,

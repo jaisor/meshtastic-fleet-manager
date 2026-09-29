@@ -64,6 +64,37 @@ const schema = z.object({
       path: z.string().default("/data/fleet.db"),
     })
     .prefault({}),
+  /**
+   * Which nodes are allowed into the fleet at all.
+   *
+   * The default admits anything the radio hears. Every key below narrows
+   * that, and they compose: a node must satisfy all of them to be admitted.
+   */
+  discovery: z
+    .object({
+      /**
+       * "any", "primary" (channel 0), or a channel index 0-7 as configured
+       * on the radio. A node must be heard on this channel to be admitted.
+       */
+      channel: z
+        .union([
+          z.literal("any"),
+          z.literal("primary"),
+          z.number().int().min(0).max(7),
+        ])
+        .default("any"),
+      /**
+       * Require an actual text message. Telemetry, position and node-info
+       * broadcasts alone will not admit a node.
+       */
+      require_message: z.boolean().default(false),
+      /**
+       * Admit only when the message text contains this substring, compared
+       * case-insensitively. Implies require_message.
+       */
+      message_contains: z.string().min(1).nullable().default(null),
+    })
+    .prefault({}),
   fleet: z
     .object({
       stale_after: duration.default(6 * 3600),
@@ -82,7 +113,17 @@ const schema = z.object({
     .prefault({}),
 });
 
+/** Discovery rules, normalized from the YAML into what the ingest needs. */
+export interface DiscoveryRules {
+  /** Null means any channel. */
+  channel: number | null;
+  requireMessage: boolean;
+  /** Already lowercased, ready to compare. */
+  messageContains: string | null;
+}
+
 export type AppConfig = z.infer<typeof schema> & {
+  discoveryRules: DiscoveryRules;
   /** Resolved at load time; never the plaintext from the file. */
   passwordHash: string;
   sessionSecret: string;
@@ -150,9 +191,22 @@ export function loadConfig(path: string): AppConfig {
     config.server.session_secret = randomBytes(32).toString("hex");
   }
 
+  const channel = config.discovery.channel;
+  const discoveryRules: DiscoveryRules = {
+    channel:
+      channel === "any" ? null : channel === "primary" ? 0 : channel,
+    // A substring filter is meaningless without a message to search, so it
+    // turns on the message requirement rather than silently doing nothing.
+    requireMessage:
+      config.discovery.require_message ||
+      config.discovery.message_contains !== null,
+    messageContains: config.discovery.message_contains?.toLowerCase() ?? null,
+  };
+
   return {
     ...config,
     passwordHash,
     sessionSecret: config.server.session_secret,
+    discoveryRules,
   };
 }

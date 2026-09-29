@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronRight, Search, X } from "lucide-react";
-import type { FleetNode } from "../../shared/types";
+import type { DiscoverySummary, FleetNode } from "../../shared/types";
 import { api } from "../api";
 import { nodePath } from "../router";
 import { CapabilityBadge } from "../components/CapabilityBadge";
@@ -22,7 +22,14 @@ import { loadFleetView, saveFleetView } from "./fleetView";
 /** Poll cadence. The mesh is slow; refreshing faster would show nothing new. */
 const REFRESH_MS = 20_000;
 
-export function Fleet({ onOpen }: { onOpen: (path: string) => void }) {
+export function Fleet({
+  onOpen,
+  discovery,
+}: {
+  onOpen: (path: string) => void;
+  /** Null until the first status poll lands. */
+  discovery: DiscoverySummary | null;
+}) {
   const [nodes, setNodes] = useState<FleetNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Seeded from sessionStorage so the view survives a trip into a node's
@@ -87,9 +94,18 @@ export function Fleet({ onOpen }: { onOpen: (path: string) => void }) {
         <h2 className="text-lg font-semibold text-white">No nodes yet</h2>
         <p className="mx-auto mt-2 max-w-md text-sm text-neutral-500">
           Discovery is passive: nodes appear here as the local radio hears
-          them on the primary channel. A quiet mesh can take a while — nodes
-          broadcast their identity roughly every few hours.
+          them. A quiet mesh can take a while — nodes broadcast their
+          identity roughly every few hours.
         </p>
+        {discovery?.restricted && (
+          // Without this an active filter is indistinguishable from a quiet
+          // mesh, and the obvious conclusion is that the radio is broken.
+          <p className="mx-auto mt-4 max-w-md rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200/90 [corner-shape:bevel]">
+            Discovery is narrowed to{" "}
+            <span className="font-medium">{discovery.description}</span>.
+            Anything else the radio hears is ignored and never recorded.
+          </p>
+        )}
       </div>
     );
   }

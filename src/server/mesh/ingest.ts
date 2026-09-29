@@ -2,6 +2,8 @@ import type { Types } from "@meshtastic/core";
 import { Protobuf } from "@meshtastic/core";
 import type { FastifyBaseLogger } from "fastify";
 import type { NodeRepository } from "../db/repositories/nodes.js";
+import type { DiscoveryRules } from "../config.js";
+import { admits, describeRules, isRestricted } from "./discovery.js";
 import type { MeshListener } from "./listener.js";
 
 /**
@@ -45,9 +47,45 @@ function zeroAsNull(value: number | undefined): number | null {
 export function attachIngest(
   listener: MeshListener,
   nodes: NodeRepository,
+  discovery: DiscoveryRules,
   logger: FastifyBaseLogger,
 ): void {
   let localNodeNum: number | null = null;
+
+  if (isRestricted(discovery)) {
+    logger.info(
+      { discovery: describeRules(discovery) },
+      "discovery is narrowed; nodes outside the criteria will be ignored",
+    );
+  }
+
+  /**
+   * The admission gate. Every handler below funnels through this before
+   * touching the database, so a node outside the discovery criteria leaves
+   * no trace at all -- not even a bare row with a last-heard time.
+   *
+   * Already-known nodes always pass: the criteria decide who joins the
+   * fleet, not what we are allowed to learn about members.
+   */
+  function admitted(nodeNum: number, evidence: Parameters<typeof admits>[1]): boolean {
+    // Our own radio is not a discovery candidate; it is the instrument.
+    if (nodeNum === localNodeNum) return true;
+    if (nodes.exists(nodeNum)) return true;
+
+    if (!admits(discovery, evidence)) {
+      logger.debug(
+        { nodeNum, evidence },
+        "packet ignored; node does not meet discovery criteria",
+      );
+      return false;
+    }
+
+    logger.info(
+      { nodeNum, evidence },
+      "node admitted to the fleet by discovery criteria",
+    );
+    return true;
+  }
 
   listener.on("myNodeInfo", (info: Protobuf.Mesh.MyNodeInfo) => {
     localNodeNum = info.myNodeNum;
@@ -65,6 +103,9 @@ export function attachIngest(
    * heard on the primary channel becomes a fleet member with no enrollment.
    */
   listener.on("nodeInfo", (info: Protobuf.Mesh.NodeInfo) => {
+    // Carries no message, so a policy requiring one rejects the whole
+    // NodeDB dump -- which is the point: the radio already knows everyone.
+    if (!admitted(info.num, { channel: info.channel })) return;
     nodes.upsert({
       nodeNum: info.num,
       shortName: info.user?.shortName || null,
@@ -82,6 +123,7 @@ export function attachIngest(
   });
 
   listener.on("user", (packet: Types.PacketMetadata<Protobuf.Mesh.User>) => {
+    if (!admitted(packet.from, { channel: packet.channel })) return;
     nodes.upsert({
       nodeNum: packet.from,
       shortName: packet.data.shortName || null,
@@ -96,6 +138,7 @@ export function attachIngest(
   listener.on(
     "telemetry",
     (packet: Types.PacketMetadata<Protobuf.Telemetry.Telemetry>) => {
+      if (!admitted(packet.from, { channel: packet.channel })) return;
       const recordedAt = resolveTime(packet.data.time);
       const variant = packet.data.variant;
 
@@ -146,6 +189,7 @@ export function attachIngest(
   listener.on(
     "position",
     (packet: Types.PacketMetadata<Protobuf.Mesh.Position>) => {
+      if (!admitted(packet.from, { channel: packet.channel })) return;
       const recordedAt = resolveTime(packet.data.time);
       nodes.upsert({ nodeNum: packet.from, lastHeardAt: recordedAt });
 
@@ -175,6 +219,9 @@ export function attachIngest(
    * discover the sender if we have not seen it before.
    */
   listener.on("message", (packet: Types.PacketMetadata<string>) => {
+    // The one packet type that can satisfy a text or substring rule.
+    if (!admitted(packet.from, { channel: packet.channel, message: packet.data }))
+      return;
     nodes.upsert({
       nodeNum: packet.from,
       lastHeardAt: Math.floor(packet.rxTime.getTime() / 1000),
@@ -196,6 +243,7 @@ export function attachIngest(
    */
   listener.on("meshPacket", (packet: Protobuf.Mesh.MeshPacket) => {
     if (localNodeNum !== null && packet.from === localNodeNum) return;
+    if (!admitted(packet.from, { channel: packet.channel })) return;
     if (packet.hopStart === 0) return;
 
     const hopsAway = packet.hopStart - packet.hopLimit;
@@ -214,6 +262,7 @@ export function attachIngest(
   listener.on(
     "metadata",
     (packet: Types.PacketMetadata<Protobuf.Mesh.DeviceMetadata>) => {
+      if (!admitted(packet.from, { channel: packet.channel })) return;
       nodes.upsert({
         nodeNum: packet.from,
         firmwareVersion: packet.data.firmwareVersion || null,

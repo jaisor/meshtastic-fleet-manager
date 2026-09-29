@@ -190,6 +190,21 @@ export class NodeRepository {
     return rows.map((row) => toFleetNode(row, this.thresholds));
   }
 
+  /**
+   * Cheap membership test for the discovery gate, which runs on every
+   * inbound packet. Avoids building a whole FleetNode just to ask whether
+   * the row is there.
+   */
+  exists(nodeNum: number): boolean {
+    return (
+      this.db
+        .prepare<[number], { one: number }>(
+          "SELECT 1 AS one FROM nodes WHERE node_num = ?",
+        )
+        .get(nodeNum) !== undefined
+    );
+  }
+
   get(nodeNum: number): FleetNode | null {
     const row = this.db
       .prepare<[number], NodeRow>("SELECT * FROM nodes WHERE node_num = ?")

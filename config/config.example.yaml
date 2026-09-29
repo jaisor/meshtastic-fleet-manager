@@ -81,6 +81,37 @@ database:
   # -wal and -shm siblings next to it.
   path: /data/fleet.db
 
+# Which nodes are allowed into the fleet at all.
+#
+# The default admits anything the radio hears, which is what you want for a
+# mesh you own. Narrow it when the radio also hears a busy public mesh you
+# have no interest in tracking.
+#
+# The keys compose -- a node must satisfy all of them -- and they gate
+# ADMISSION only. Once a node is in the fleet it is tracked normally, or a
+# node admitted by one message would never record telemetry again.
+#
+# Nodes that do not match are ignored completely: no row, no last-heard
+# time, no trace at all.
+discovery:
+  # "any", "primary" (channel 0), or a channel index 0-7 as configured on
+  # the radio. The node must be heard on this channel to be admitted.
+  channel: any
+
+  # Require an actual text message. Telemetry, position and node-info
+  # broadcasts alone will not admit a node.
+  #
+  # This also filters the node database the radio hands over on connect,
+  # which is deliberate: that dump contains everything the radio has ever
+  # heard, and letting it through would admit the whole mesh on first run.
+  require_message: false
+
+  # Admit only when the message text contains this substring, compared
+  # case-insensitively. Setting it implies require_message: true.
+  #
+  #   message_contains: "join fleet"
+  message_contains: null
+
 fleet:
   # A node heard within this window is "online".
   stale_after: 6h
