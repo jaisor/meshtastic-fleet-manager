@@ -50,9 +50,27 @@ services:
       # directory itself has to be writable. A single-file bind mount fails
       # with "attempt to write a readonly database".
       #
+      # Do NOT use /tmp. It is a tmpfs on most systems, so the fleet history
+      # is wiped on every reboot; systemd-tmpfiles also prunes it while
+      # running. Worse, if dockerd's unit sets PrivateTmp=true, the /tmp the
+      # daemon sees is not the /tmp in your shell -- Docker then creates its
+      # own empty root:root 0755 directory and any chmod you applied has no
+      # effect at all. Use /var/lib/... or /srv/... instead.
+      #
       # The container runs as uid 1000 (`node`), so a bind-mounted host
       # directory must be writable by that uid -- `sudo chown 1000:1000 <dir>`
       # on Linux. Docker Desktop on Windows and macOS handles this for you.
+      # A bind mount keeps the host's ownership as-is; unlike a named volume
+      # it is never re-owned to match the image, which is why one works out
+      # of the box and the other needs a chown.
+      #
+      # Note that 0666 is NOT enough on a directory: without the execute bit
+      # it cannot be entered, and SQLite fails with "unable to open database
+      # file" exactly as if it had no permissions at all.
+      #
+      # On SELinux hosts (RHEL, Fedora, Rocky, Alma) add a :z suffix --
+      # `- /srv/meshtastic/data:/data:z` -- or the container is denied
+      # regardless of ownership and mode.
       # If you switch after collecting data, copy it across first with the
       # `docker run ... cp` recipe above.
       - fleet-data:/data

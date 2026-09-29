@@ -66,8 +66,29 @@ docker run --rm -v meshtastic-fleet-manager_fleet-data:/data busybox ls -la /dat
 
 To keep it in an ordinary host folder instead — easier to back up or open in a SQLite
 browser — swap the volume line in `docker/compose.yaml` for a bind mount such as
-`- /srv/meshtastic/data:/data`. Mount the **directory**, never the `.db` file itself.
-`docker/compose.yaml` has the full comment, including the uid the container runs as.
+`- /srv/meshtastic/data:/data`, then make it writable by the container user:
+
+```sh
+sudo mkdir -p /srv/meshtastic/data
+sudo chown -R 1000:1000 /srv/meshtastic/data
+```
+
+A bind mount keeps the host's ownership as-is; unlike a named volume it is never re-owned
+to match the image, which is why one works out of the box and the other needs that `chown`.
+
+Four things that bite here, all of which surface as `unable to open database file`:
+
+- **Mount the directory, never the `.db` file.** WAL creates `-wal` and `-shm` siblings.
+- **`0666` is not enough on a directory.** Without the execute bit it cannot be entered at
+  all, so loosening permissions that way fails exactly as if you had set none.
+- **Avoid `/tmp`.** It is a tmpfs on most systems, so history is lost on reboot. If the
+  Docker daemon's unit sets `PrivateTmp=true`, its `/tmp` is not the one in your shell —
+  Docker silently creates its own `root:root 0755` directory and your `chmod` does nothing.
+- **SELinux hosts need a `:z` suffix** (`- /srv/meshtastic/data:/data:z`), or access is
+  denied regardless of ownership and mode.
+
+The server reports which of these it is on startup: the resolved path, the uid it runs as,
+and the directory's actual owner and mode.
 
 ## Running without Docker
 
