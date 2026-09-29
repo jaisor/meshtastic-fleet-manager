@@ -82,7 +82,14 @@ export function App() {
       <Backdrop />
       <Layout radio={radio} onLogout={() => void logout()}>
         {route.name === "node" ? (
-          <NodeDetail nodeId={route.nodeId} onBack={() => navigate("/")} />
+          <NodeDetail
+            nodeId={route.nodeId}
+            onBack={() => navigate("/")}
+            // Null until the first status poll lands. Treating "unknown" as
+            // "no radio" keeps the mesh-write controls disabled until we
+            // actually know, rather than offering a button that 503s.
+            radioConnected={radio?.connected ?? false}
+          />
         ) : (
           <Fleet onOpen={navigate} />
         )}

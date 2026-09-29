@@ -69,10 +69,22 @@ export interface NodeDetail {
   positions: PositionPoint[];
 }
 
-/** Connection state of the local USB-attached radio. */
+/**
+ * Connection state of the local USB-attached radio.
+ *
+ * The server runs perfectly well without one: reads are served from SQLite
+ * either way. This is what the UI needs to say so, and to disable the
+ * handful of controls that do need the mesh.
+ */
 export interface RadioStatus {
   connected: boolean;
   configured: boolean;
+  /**
+   * False when `serial.enabled` is off in config. Distinct from
+   * `connected: false`, which means we are trying and failing -- one is a
+   * deliberate choice, the other is a fault, and they need different words.
+   */
+  enabled: boolean;
   portPath: string;
   localNodeNum: number | null;
   lastErrorText: string | null;

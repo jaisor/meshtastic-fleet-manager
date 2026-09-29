@@ -5,8 +5,9 @@ monitoring, and remote administration over the mesh.
 
 Status: **first pass built and running.** Discovery, persistence, auth, the fleet list,
 node detail, the admin-capability probe, and remote rename all work end to end against a
-seeded database. Verified without hardware and without Docker -- see §11 for exactly what
-that leaves unproven. Update this line and §10 as work lands.
+seeded database, including degraded mode with no radio attached. Verified without
+hardware and without Docker -- see §12 for exactly what that leaves unproven. Update this
+line and §13 as work lands.
 
 ---
 
@@ -28,6 +29,9 @@ and remotely reconfiguring them.
 4. **Remote configuration.** From a node's detail page, change a bounded set of settings
    on that remote node via Meshtastic admin messages.
 5. **Session auth.** Every browser session requires a password defined in the YAML config.
+6. **Degraded mode.** With no working radio the console still boots and serves everything
+   in the database, read-only, and says so. See §6 — this is a requirement, not a
+   fallback.
 
 **UI surfaces**
 
@@ -69,6 +73,22 @@ npm run lint          # oxlint
 
 `npm run dev` reads `config/config.yaml` from the repo; `MFM_CONFIG` overrides. The real
 config is gitignored — copy `config/config.example.yaml` to create it.
+
+**Two things about the dev server that cost an afternoon once:**
+
+- **The Vite proxy key is the regex `"^/api/"`, not the string `"/api"`.** A plain string
+  key is a *prefix* match, so `"/api"` also captures `/api.ts` — which is how Vite serves
+  `src/web/api.ts` to the browser. That request got proxied to the backend instead of
+  compiled, and the app died on load with a 400 for `http://localhost:5173/api.ts`. Every
+  real endpoint is under `/api/`, so the anchored form is exact. Renaming `api.ts` would
+  also dodge it, but the pattern was the actual bug.
+- **The proxy target port is read from `config/config.yaml`**, not hardcoded, with
+  `MFM_API_PORT` as an override. The two disagreeing is miserable to debug: Vite proxies
+  to whatever else answers on the stale port and the browser shows a stranger's HTTP
+  errors. On this machine port **8080 is held by `AntecHardwareMonitorWindowsService.exe`**,
+  which answers 501 to everything — so the default port is a bad choice here. `server.port`
+  in the dev config should be something unlikely to collide. A port clash now exits with a
+  named fatal message rather than a bare `EADDRINUSE` stack.
 
 **Environment note:** `node`/`npm` are on PATH via nvm4w, so the npm commands work
 directly. Docker Desktop is often not running, so treat the container path as the
@@ -142,7 +162,7 @@ Meshtastic JS packages move fast and `transport-node-serial` is pre-1.0.
   `onMeshPacket` by filtering `portnum === PortNum.ADMIN_APP` (6) and decoding the payload
   with `AdminMessageSchema`. This is the main reason `mesh/admin.ts` exists as its own module.
 
-**Two packaging landmines, both hit during the first build:**
+**Three landmines in these packages, all hit during the first build:**
 
 1. `@meshtastic/core` and `@meshtastic/transport-node-serial` declare
    `preinstall: npx only-allow pnpm`. With npm lifecycle scripts enabled that **aborts the
@@ -163,6 +183,25 @@ Meshtastic JS packages move fast and `transport-node-serial` is pre-1.0.
    bundled, only the types reference the bare specifier. Without it every event callback
    silently degrades to `any`. It is carried as an explicit devDependency; if the server
    suddenly typechecks loose around `device.events.*`, check that it is still installed.
+
+3. **`TransportNodeSerial.create()` crashes the process when the port cannot be opened.**
+   Do not use it. Its error path is:
+
+   ```js
+   const onError = (err) => { port.close(); reject(err); };
+   port.once("error", onError);
+   ```
+
+   `close()` on a port that never opened does not throw — with no callback it *emits*
+   `error`. The `once` listener has already been consumed by the time it runs, so nothing
+   is listening, and Node turns an unhandled `error` event into an uncaught exception.
+   A missing, busy or renamed device therefore takes the whole server down.
+
+   `mesh/listener.ts` opens the port itself instead: `autoOpen: false`, a durable `error`
+   listener attached before anything can fail, then `port.open(callback)`, then
+   `new TransportNodeSerial(port)`. Revert to the factory only once this is fixed upstream.
+   `disconnect()` has the same `port.close()` shape but is safe, because the transport
+   constructor leaves a permanent `error` listener attached.
 
 ---
 
@@ -221,7 +260,62 @@ the first pass.
 
 ---
 
-## 6. Configuration
+## 6. Degraded mode — running without a radio
+
+**The console must come up and stay up with no working radio.** That is a requirement, not
+a nicety: when the radio is the broken thing, the console is how an operator finds out why.
+The rule is *read everything, write nothing*.
+
+What holds it up:
+
+- **Startup never depends on the serial port.** `listener.start()` is fire-and-forget and
+  `app.listen()` does not wait on it. A bad path, an absent device or a busy port produces
+  a warning and a backoff retry, never a failed boot. Only an unreadable or invalid config
+  file is fatal.
+- **Every HTTP read serves from SQLite.** No read path touches the radio, so the fleet
+  list, node detail, telemetry history and positions are all fully available offline.
+- **Writes are refused at the server, not just hidden in the UI.** `POST /probe` and
+  `PATCH /config` both return **503** when `listener.getDevice()` is null. The UI disabling
+  those controls is a courtesy on top of the real gate, not the gate itself.
+- **`RadioStatus.enabled` distinguishes the two cases.** `enabled: false` means
+  `serial.enabled` is off in config — a deliberate choice. `enabled: true, connected:
+  false` means we are trying and failing — a fault, and the banner says it is retrying and
+  shows `lastErrorText`. They read differently on purpose.
+- **A crash guard in `index.ts`**, armed only after `app.listen()` resolves, catches
+  `uncaughtException` and `unhandledRejection`, logs at **fatal** with the stack, and
+  cycles the listener back into its reconnect loop instead of exiting. This is a deliberate
+  exception to "never swallow an uncaught exception": the serial path runs through a
+  pre-1.0 dependency over a native binding, and losing the console — plus the history in
+  SQLite and any explanation — because a USB port misbehaved is the worse failure. Nothing
+  is silent, and a crash *before* the server is listening still exits non-zero, so startup
+  bugs stay loud.
+
+In the UI:
+
+- The header pill is always present and is the glanceable state — green connected, amber
+  `Radio disconnected — read-only` or `Radio off — read-only`.
+- `DegradedBanner` (in `Layout`, so it is on every page) appears only on a fault and
+  explains the consequences, with port path, last-connected time, retry status and the
+  underlying error. It is **amber, not red**: the console is working and everything on
+  screen is real; what is lost is freshness and the ability to write. Red would say "this
+  page is broken", which is wrong and teaches people to ignore banners.
+- `NodeDetail` takes `radioConnected` and disables the re-probe button, both name inputs
+  and the apply button, each carrying `NO_RADIO_HINT` as its `title`. While the first
+  status poll is in flight `radio` is null, which is treated as **not connected** — better
+  a brief disabled flicker than a button that 503s.
+- With no radio the admin-capability advice block is replaced rather than shown: telling
+  someone they "can still try" next to a disabled button would be a lie.
+
+Node state (`online` / `stale` / `offline`) stays derived from `lastHeardAt`, so with the
+radio down every node decays through those states on its own. That is correct — the
+timestamps are real — and the banner is what explains that nothing new is arriving.
+
+**When adding a route that touches the mesh**, gate it on `listener.getDevice()` and return
+503, and give the UI control a `radioConnected` guard. Both halves, every time.
+
+---
+
+## 7. Configuration
 
 One mounted YAML file, validated with zod at startup. Invalid config is fatal and the
 error names the offending path — a fleet manager that silently starts with half a config
@@ -247,7 +341,7 @@ Notes that are easy to get wrong:
 
 ---
 
-## 7. Auth
+## 8. Auth
 
 Single shared password, sessions held **in memory**, keyed by a 32-byte random id in a
 signed `HttpOnly` / `SameSite=strict` cookie. A restart logs everyone out; for a
@@ -262,7 +356,7 @@ Failed logins sleep ~750ms before replying, which is the whole of the rate limit
 
 ---
 
-## 8. Docker
+## 9. Docker
 
 - Debian slim, not Alpine: `better-sqlite3` and `serialport` both ship glibc prebuilds,
   and musl would mean compiling from source in every image build.
@@ -281,7 +375,7 @@ Failed logins sleep ~750ms before replying, which is the whole of the rate limit
 
 ---
 
-## 9. Design language
+## 10. Design language
 
 Matches jaisor.net, whose source is at <https://github.com/jaisor/jaisor.github.io>. It is
 a **dark** theme; "futuristic and light" was confirmed to mean lightweight and uncluttered,
@@ -325,7 +419,7 @@ bloom over near-black.
 
 ---
 
-## 10. Conventions
+## 11. Conventions
 
 - **Node identity:** `nodeNum` (uint32) is the primary key everywhere on the server; `!hex`
   is display only. Convert at the boundary via `mesh/nodeId.ts`. The API accepts
@@ -362,18 +456,32 @@ bloom over near-black.
 
 ---
 
-## 11. What is verified, and what is not
+## 12. What is verified, and what is not
 
 Built and exercised end to end on 2026-09-28 against a seeded database: login and session
 rejection, the fleet list, node detail with telemetry history, node-id parsing in all three
 forms, the 400/404/503 error paths, SPA fallback routing, and the production build served
 by Fastify. UI checked at 1280px and 390px with no console errors.
 
+`npm run dev` is verified too, and was not originally: the first pass only ever exercised
+the production build served by Fastify, which is why the `/api` proxy-prefix bug shipped.
+Login, fleet render and the degraded banner all work through the Vite dev server with no
+failed requests and no console errors.
+
+Degraded mode is verified in all three states: `serial.enabled: false`, and a configured
+port that does not exist (the server stays up, keeps retrying, and surfaces the real
+`Opening /dev/...: Unknown error code 3`), and recovery — with the status endpoint stubbed
+to flip `connected` to true, the banner clears and every mesh control re-enables without a
+page reload. Server-side, `POST /probe` and `PATCH /config` were confirmed to return 503
+with no radio, so the UI's disabled state is not the only thing standing between a click
+and a bad request.
+
 **Not verified, and the first things to check with hardware in hand:**
 
-- Anything involving a real radio: serial connect, the NodeDB dump on `configure()`,
-  reconnect after unplug, and every ingest path. All of it is written against the published
-  type declarations, not against observed packets.
+- Anything involving a real radio: serial connect *succeeding*, the NodeDB dump on
+  `configure()`, reconnect after unplug, and every ingest path. All of it is written
+  against the published type declarations, not against observed packets. (The *failure*
+  side of connect is verified — see above.)
 - **Whether a write admin message actually answers.** `mesh/admin.ts` sends `setOwner` with
   `wantResponse` and waits for a reply. If firmware does not respond to admin *writes* the
   way it does to reads, that call will time out and report `failed` even though the change
@@ -387,7 +495,7 @@ by Fastify. UI checked at 1280px and 390px with no console errors.
 
 ---
 
-## 12. Checkpoints
+## 13. Checkpoints
 
 1. ~~Scaffold: TS config, Fastify server, Vite app, Dockerfile, config loader.~~ Done.
 2. ~~DB layer: migrations, schema, repositories.~~ Done.
@@ -399,7 +507,7 @@ by Fastify. UI checked at 1280px and 390px with no console errors.
 
 Next, roughly in order of value:
 
-- Bench-test against a real radio and settle §11.
+- Bench-test against a real radio and settle §12.
 - Telemetry charts on the detail page (the history table is honest about gaps; a chart must
   not draw a line straight through an outage).
 - Widen the writable settings beyond names, one field at a time.

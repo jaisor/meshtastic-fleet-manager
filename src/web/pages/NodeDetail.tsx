@@ -14,9 +14,12 @@ import {
 export function NodeDetail({
   nodeId,
   onBack,
+  radioConnected,
 }: {
   nodeId: string;
   onBack: () => void;
+  /** False disables everything that would have to go out over the mesh. */
+  radioConnected: boolean;
 }) {
   const [detail, setDetail] = useState<NodeDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -158,7 +161,11 @@ export function NodeDetail({
       <TelemetryHistory points={telemetry} />
 
       {!node.isLocal && (
-        <RemoteConfig detail={detail} onChanged={() => void load()} />
+        <RemoteConfig
+          detail={detail}
+          radioConnected={radioConnected}
+          onChanged={() => void load()}
+        />
       )}
     </div>
   );
@@ -250,6 +257,10 @@ function TelemetryHistory({
   );
 }
 
+/** Reason shown on every control that would need the mesh. */
+const NO_RADIO_HINT =
+  "Unavailable while the local radio is disconnected — these actions go out over the mesh.";
+
 /**
  * Remote configuration.
  *
@@ -260,9 +271,11 @@ function TelemetryHistory({
  */
 function RemoteConfig({
   detail,
+  radioConnected,
   onChanged,
 }: {
   detail: NodeDetailResponse;
+  radioConnected: boolean;
   onChanged: () => void;
 }) {
   const { node, operations } = detail;
@@ -329,8 +342,9 @@ function RemoteConfig({
         <button
           type="button"
           onClick={() => void probe()}
-          disabled={probing}
-          className="inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-3 py-1.5 text-xs text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400 disabled:opacity-40"
+          disabled={probing || !radioConnected}
+          title={radioConnected ? undefined : NO_RADIO_HINT}
+          className="inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-3 py-1.5 text-xs text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-neutral-800 disabled:hover:text-neutral-400"
         >
           <RefreshCw
             aria-hidden
@@ -340,12 +354,22 @@ function RemoteConfig({
         </button>
       </div>
 
-      {node.adminCapability !== "capable" && (
-        <p className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200/90 [corner-shape:bevel]">
-          {node.adminCapability === "unauthorized"
-            ? "This node refused an admin request. Add the local node's public key to its security.admin_key list, then re-probe."
-            : "Admin rights for this node are not established. You can still try — the probe only tells you what happened last time."}
+      {/* With no radio there is nothing to say about admin rights that the
+          degraded banner has not already said, and repeating "you can still
+          try" next to controls that are disabled would be a lie. */}
+      {!radioConnected ? (
+        <p className="mb-4 rounded-lg border border-neutral-800 bg-neutral-950/60 p-3 text-sm text-neutral-400 [corner-shape:bevel]">
+          {NO_RADIO_HINT} The last known admin status for this node is shown
+          above and was accurate as of its last probe.
         </p>
+      ) : (
+        node.adminCapability !== "capable" && (
+          <p className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200/90 [corner-shape:bevel]">
+            {node.adminCapability === "unauthorized"
+              ? "This node refused an admin request. Add the local node's public key to its security.admin_key list, then re-probe."
+              : "Admin rights for this node are not established. You can still try — the probe only tells you what happened last time."}
+          </p>
+        )
       )}
 
       <form onSubmit={submit} className="space-y-4">
@@ -357,8 +381,9 @@ function RemoteConfig({
             <input
               value={longName}
               maxLength={39}
+              disabled={!radioConnected}
               onChange={(event) => setLongName(event.target.value)}
-              className="mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-100 [corner-shape:bevel] focus:border-amber-500/50"
+              className="mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-100 [corner-shape:bevel] focus:border-amber-500/50 disabled:cursor-not-allowed disabled:text-neutral-500"
             />
           </label>
           <label className="block">
@@ -368,8 +393,9 @@ function RemoteConfig({
             <input
               value={shortName}
               maxLength={4}
+              disabled={!radioConnected}
               onChange={(event) => setShortName(event.target.value)}
-              className="data mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-100 [corner-shape:bevel] focus:border-amber-500/50"
+              className="data mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-100 [corner-shape:bevel] focus:border-amber-500/50 disabled:cursor-not-allowed disabled:text-neutral-500"
             />
           </label>
         </div>
@@ -385,8 +411,9 @@ function RemoteConfig({
 
         <button
           type="submit"
-          disabled={busy || !dirty}
-          className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-4 py-2 text-sm font-medium text-amber-300 transition [corner-shape:bevel] hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={busy || !dirty || !radioConnected}
+          title={radioConnected ? undefined : NO_RADIO_HINT}
+          className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-4 py-2 text-sm font-medium text-amber-300 transition [corner-shape:bevel] hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-amber-500/15"
         >
           {busy ? "Sending over the mesh…" : "Apply to remote node"}
         </button>

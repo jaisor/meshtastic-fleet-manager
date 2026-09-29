@@ -29,6 +29,8 @@ export interface ListenerOptions {
   baud: number;
   /** Seconds between reconnect attempts; the final value repeats. */
   backoff: number[];
+  /** False when serial.enabled is off; reported so the UI can say why. */
+  enabled: boolean;
   logger: FastifyBaseLogger;
 }
 
@@ -42,6 +44,7 @@ export class MeshListener extends EventEmitter {
   private status: RadioStatus = {
     connected: false,
     configured: false,
+    enabled: true,
     portPath: "",
     localNodeNum: null,
     lastErrorText: null,
@@ -51,6 +54,7 @@ export class MeshListener extends EventEmitter {
   constructor(private readonly options: ListenerOptions) {
     super();
     this.status.portPath = options.portPath;
+    this.status.enabled = options.enabled;
   }
 
   getStatus(): RadioStatus {
@@ -104,7 +108,8 @@ export class MeshListener extends EventEmitter {
       this.status.portPath = path;
       this.options.logger.info({ path }, "connecting to local Meshtastic node");
 
-      const transport = await TransportNodeSerial.create(path, this.options.baud);
+      const port = await openSerialPort(path, this.options.baud, this.options.logger);
+      const transport = new TransportNodeSerial(port);
       this.transport = transport;
 
       const device = new MeshDevice(transport);
@@ -170,6 +175,53 @@ export class MeshListener extends EventEmitter {
     device.events.onRoutingPacket.subscribe((p) => this.emit("routing", p));
     device.events.onMeshPacket.subscribe((p) => this.emit("meshPacket", p));
   }
+}
+
+/**
+ * Opens the serial port ourselves instead of calling
+ * `TransportNodeSerial.create()`.
+ *
+ * That factory crashes the process when the port cannot be opened. Its
+ * error path is:
+ *
+ * ```js
+ * const onError = (err) => { port.close(); reject(err); };
+ * port.once("error", onError);
+ * ```
+ *
+ * `close()` on a port that never opened does not throw -- with no callback
+ * it *emits* `error`. The `once` listener has already been consumed by the
+ * time it runs, so nothing is listening, and Node turns an unhandled
+ * `error` event into an uncaught exception. A missing or busy radio would
+ * take the whole server down with it, which is precisely what must not
+ * happen: the console has to come up so an operator can see why.
+ *
+ * So: create the port with `autoOpen: false`, attach a durable `error`
+ * listener *before* anything can fail, and open it with a callback. Fixed
+ * upstream, this can go back to `TransportNodeSerial.create`.
+ */
+function openSerialPort(
+  path: string,
+  baudRate: number,
+  logger: FastifyBaseLogger,
+): Promise<SerialPort> {
+  return new Promise((resolve, reject) => {
+    const port = new SerialPort({ path, baudRate, autoOpen: false });
+
+    // Stays attached for the port's lifetime. `TransportNodeSerial` adds
+    // its own handler later; several listeners are fine, zero is fatal.
+    port.on("error", (cause: Error) => {
+      logger.warn({ err: cause.message }, "serial port error");
+    });
+
+    port.open((cause) => {
+      if (cause) {
+        reject(cause);
+        return;
+      }
+      resolve(port);
+    });
+  });
 }
 
 /**

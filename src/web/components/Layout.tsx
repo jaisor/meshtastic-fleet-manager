@@ -1,15 +1,20 @@
 import type { ReactNode } from "react";
-import { RadioTower, LogOut } from "lucide-react";
+import { RadioTower, LogOut, TriangleAlert } from "lucide-react";
 import type { RadioStatus } from "../../shared/types";
-import { relativeTime } from "./format";
+import { absoluteTime, relativeTime } from "./format";
 
 /**
- * Page chrome: the masthead with the local radio's state, and the footer.
+ * Page chrome: the masthead with the local radio's state, the degraded-mode
+ * banner, and the footer.
  *
- * The radio banner is not decoration. Every number in this app comes from
- * the database, not live from the mesh, so when the USB link is down the
- * page still renders perfectly plausible rows that are hours old. Saying
- * so at the top is the difference between stale data and wrong data.
+ * The banner is not decoration. Every number in this app comes from the
+ * database, not live from the mesh, so with the USB link down the page
+ * still renders perfectly plausible rows that are hours old. Saying so is
+ * the difference between stale data and wrong data.
+ *
+ * The header pill and the banner are not redundant: the pill is glanceable
+ * state that is also present (and green) when things are fine, the banner
+ * appears only on a fault and explains the consequences.
  */
 export function Layout({
   radio,
@@ -44,11 +49,79 @@ export function Layout({
         </div>
       </header>
 
+      {radio && !radio.connected && <DegradedBanner radio={radio} />}
+
       <main className="flex-1">{children}</main>
 
       <footer className="mt-10 border-t border-neutral-800 pt-6 text-center text-xs text-neutral-600">
         Meshtastic Fleet Manager
       </footer>
+    </div>
+  );
+}
+
+/**
+ * Shown whenever the radio is not connected.
+ *
+ * Amber rather than red on purpose: the console is working, and everything
+ * on screen is real. What is lost is freshness and the ability to write.
+ * Red would say "this page is broken", which would be wrong and would
+ * teach people to ignore the banner.
+ */
+function DegradedBanner({ radio }: { radio: RadioStatus }) {
+  const disabledByConfig = !radio.enabled;
+
+  return (
+    <div
+      role="status"
+      className="card mb-6 border-amber-500/40 bg-amber-500/10 p-4"
+    >
+      <div className="flex gap-3">
+        <TriangleAlert
+          aria-hidden
+          className="mt-0.5 h-5 w-5 shrink-0 text-amber-400"
+        />
+        <div className="min-w-0">
+          <p className="font-semibold text-amber-200">
+            Degraded mode — no radio
+          </p>
+          <p className="mt-1 text-sm text-amber-200/80">
+            {disabledByConfig
+              ? "Radio support is turned off in the configuration file. "
+              : "The local radio is not connected. "}
+            Everything below is served from the database and is accurate as of
+            each node&rsquo;s last check-in, but nothing is updating and remote
+            operations are unavailable.
+          </p>
+
+          <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-xs text-amber-200/60">
+            <div className="flex gap-1.5">
+              <dt>Port:</dt>
+              <dd className="data">{radio.portPath || "not configured"}</dd>
+            </div>
+            <div className="flex gap-1.5">
+              <dt>Last connected:</dt>
+              <dd title={absoluteTime(radio.lastConnectedAt)}>
+                {radio.lastConnectedAt
+                  ? relativeTime(radio.lastConnectedAt)
+                  : "not since startup"}
+              </dd>
+            </div>
+            {!disabledByConfig && (
+              <div className="flex gap-1.5">
+                <dt>Status:</dt>
+                <dd>retrying automatically</dd>
+              </div>
+            )}
+          </dl>
+
+          {radio.lastErrorText && (
+            <p className="data mt-2 text-xs break-words text-amber-200/50">
+              {radio.lastErrorText}
+            </p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -70,14 +143,15 @@ function RadioPill({ radio }: { radio: RadioStatus }) {
     ? `Last connected ${relativeTime(radio.lastConnectedAt)}.`
     : "Never connected since startup.";
 
+  // Matches the banner's amber: the console works, it is just read-only.
   return (
     <span
       title={`${detail}${radio.lastErrorText ? ` ${radio.lastErrorText}` : ""}`}
-      className="inline-flex items-center gap-2 rounded-full border border-red-500/40 bg-red-500/10 px-3 py-1 text-xs font-medium text-red-300 [corner-shape:bevel]"
+      className="inline-flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-300 [corner-shape:bevel]"
     >
-      <span aria-hidden className="h-2 w-2 rounded-full bg-red-500" />
-      Radio disconnected
-      <span className="hidden sm:inline">— data may be stale</span>
+      <span aria-hidden className="h-2 w-2 rounded-full bg-amber-500" />
+      {radio.enabled ? "Radio disconnected" : "Radio off"}
+      <span className="hidden sm:inline">— read-only</span>
     </span>
   );
 }

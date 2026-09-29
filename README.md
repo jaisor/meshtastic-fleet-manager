@@ -51,6 +51,12 @@ npm run dev          # API on :8080, UI on :5173 with hot reload
 
 `npm run dev` reads `config/config.yaml` from the repo. Set `MFM_CONFIG` to override.
 
+The Vite dev server proxies `/api/` to whatever port `server.port` names in that config, so
+the two cannot drift apart. Set `MFM_API_PORT` if the API is running somewhere else.
+
+If startup reports the port is already in use, pick another one in `server.port` — 8080 in
+particular is claimed by unrelated software on a fair number of machines.
+
 For a production run outside Docker:
 
 ```sh
@@ -98,6 +104,27 @@ node -e "import('./dist/server/config.js').then(m=>console.log(m.hashPassword('y
 Set `server.secure_cookies: true` only when the console is reached over HTTPS. Browsers
 silently drop `Secure` cookies on a plain-HTTP origin, and the symptom is a login form that
 appears to do nothing.
+
+## Running without a radio
+
+The console boots and keeps running whether or not the local radio is working. If the
+serial port is missing, busy, misconfigured, or unplugged while running, the server still
+starts, still serves everything already in the database, and retries the connection in the
+background on a backoff. Only an unreadable or invalid config file stops it from starting.
+
+In that state the UI shows a **degraded mode** banner naming the port, when the radio was
+last connected, and the underlying error. Everything remains readable — the fleet list,
+node detail, telemetry history and positions are all served from SQLite. Anything that
+would have to go out over the mesh is disabled: the re-probe button, the remote
+configuration form, and its apply button. The server independently rejects those requests
+with 503, so the disabled controls are a courtesy rather than the only safeguard.
+
+Nothing needs restarting when the radio comes back. The console polls its status and
+re-enables the mesh controls on its own.
+
+Set `serial.enabled: false` to run deliberately without a radio — useful for development,
+or for reading history off a database copy. The banner says so explicitly in that case
+rather than reporting a fault.
 
 ## Remote administration
 
