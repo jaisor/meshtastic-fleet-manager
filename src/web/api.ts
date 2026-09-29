@@ -5,6 +5,7 @@ import type {
   NodeConfigUpdate,
   PositionPoint,
   RadioStatus,
+  RadioTask,
   TelemetryPoint,
 } from "../shared/types";
 
@@ -52,6 +53,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export interface StatusResponse {
   radio: RadioStatus;
   staleAfter: number;
+  /** User-initiated operations currently occupying the radio. */
+  tasks: RadioTask[];
 }
 
 export interface NodeDetailResponse {
@@ -74,6 +77,11 @@ export const api = {
     request<{ authenticated: boolean }>("/api/session", { method: "DELETE" }),
 
   getStatus: () => request<StatusResponse>("/api/status"),
+
+  cancelTask: (id: number) =>
+    request<{ cancelled: boolean }>(`/api/tasks/${id}/cancel`, {
+      method: "POST",
+    }),
 
   listNodes: () => request<{ nodes: FleetNode[] }>("/api/nodes"),
 

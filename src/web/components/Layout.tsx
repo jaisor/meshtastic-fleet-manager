@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { RadioTower, LogOut, TriangleAlert } from "lucide-react";
-import type { RadioStatus } from "../../shared/types";
+import type { RadioStatus, RadioTask } from "../../shared/types";
+import { RadioTaskBanner } from "./RadioTaskBanner";
 import { absoluteTime, relativeTime } from "./format";
 
 /**
@@ -18,10 +19,14 @@ import { absoluteTime, relativeTime } from "./format";
  */
 export function Layout({
   radio,
+  tasks,
+  onCancelTask,
   onLogout,
   children,
 }: {
   radio: RadioStatus | null;
+  tasks: RadioTask[];
+  onCancelTask: (task: RadioTask) => void;
   onLogout: () => void;
   children: ReactNode;
 }) {
@@ -50,6 +55,8 @@ export function Layout({
       </header>
 
       {radio && !radio.connected && <DegradedBanner radio={radio} />}
+
+      <RadioTaskBanner tasks={tasks} onCancel={onCancelTask} />
 
       <main className="flex-1">{children}</main>
 

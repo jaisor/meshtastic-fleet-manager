@@ -3,6 +3,7 @@ import { Protobuf, Types } from "@meshtastic/core";
 import type { FastifyBaseLogger } from "fastify";
 import type { AdminCapability, NodeConfigUpdate } from "../../shared/types.js";
 import type { MeshListener } from "./listener.js";
+import { TaskCancelledError } from "./tasks.js";
 
 /**
  * Remote administration over the mesh.
@@ -176,8 +177,13 @@ export class AdminClient {
   private async request(
     nodeNum: number,
     variant: PayloadVariant,
-    options: { withPasskey: boolean },
+    options: { withPasskey: boolean; signal?: AbortSignal },
   ): Promise<AdminMessage> {
+    // Checked before transmitting as well as while waiting: a cancel that
+    // lands between two requests of a multi-step operation should stop the
+    // next one going out at all.
+    if (options.signal?.aborted) throw new TaskCancelledError();
+
     const device = this.options.listener.getDevice();
     if (!device) {
       throw new AdminError("local radio is not connected", "unknown");
@@ -216,16 +222,40 @@ export class AdminClient {
         );
       }, this.options.timeout * 1000);
 
-      this.pending.set(packetId, { resolve, reject, timer });
+      // Cancelling cannot un-send a packet that is already on the air. What
+      // it does is stop us waiting on it and release the operation, so the
+      // UI unblocks immediately. A late reply is simply unmatched and
+      // dropped by `deliver`.
+      const onAbort = () => {
+        clearTimeout(timer);
+        this.pending.delete(packetId);
+        reject(new TaskCancelledError());
+      };
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+
+      this.pending.set(packetId, {
+        resolve: (response) => {
+          options.signal?.removeEventListener("abort", onAbort);
+          resolve(response);
+        },
+        reject: (error) => {
+          options.signal?.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+        timer,
+      });
     });
   }
 
   /** Reads a remote node's firmware metadata. Doubles as the admin probe. */
-  async getMetadata(nodeNum: number): Promise<Protobuf.Mesh.DeviceMetadata> {
+  async getMetadata(
+    nodeNum: number,
+    signal?: AbortSignal,
+  ): Promise<Protobuf.Mesh.DeviceMetadata> {
     const response = await this.request(
       nodeNum,
       { case: "getDeviceMetadataRequest", value: true },
-      { withPasskey: false },
+      { withPasskey: false, signal },
     );
     if (response.payloadVariant.case !== "getDeviceMetadataResponse") {
       throw new AdminError(
@@ -245,11 +275,15 @@ export class AdminClient {
    * `unreachable`, never `unauthorized` -- an out-of-range node must not be
    * reported as a permissions problem.
    */
-  async probe(nodeNum: number): Promise<AdminCapability> {
+  async probe(nodeNum: number, signal?: AbortSignal): Promise<AdminCapability> {
     try {
-      await this.getMetadata(nodeNum);
+      await this.getMetadata(nodeNum, signal);
       return "capable";
     } catch (cause) {
+      // A cancelled probe establishes nothing, so it must propagate rather
+      // than be recorded as a verdict -- writing "unreachable" here would
+      // brand a node unreachable because someone clicked stop.
+      if (cause instanceof TaskCancelledError) throw cause;
       if (cause instanceof AdminError) return cause.capability;
       return "unknown";
     }
@@ -260,11 +294,15 @@ export class AdminClient {
    * read the current one first and patch it -- sending a partial User blanks
    * whichever name was omitted.
    */
-  async setOwner(nodeNum: number, update: NodeConfigUpdate): Promise<void> {
+  async setOwner(
+    nodeNum: number,
+    update: NodeConfigUpdate,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const current = await this.request(
       nodeNum,
       { case: "getOwnerRequest", value: true },
-      { withPasskey: false },
+      { withPasskey: false, signal },
     );
     if (current.payloadVariant.case !== "getOwnerResponse") {
       throw new AdminError("could not read current owner", "unknown");
@@ -280,7 +318,7 @@ export class AdminClient {
     await this.request(
       nodeNum,
       { case: "setOwner", value: patched },
-      { withPasskey: true },
+      { withPasskey: true, signal },
     );
   }
 

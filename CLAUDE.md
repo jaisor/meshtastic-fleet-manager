@@ -122,10 +122,12 @@ src/server/
     ingest.ts                packet -> repository writes
     admin.ts                 AdminMessage build/send/correlate, session passkey
     capability.ts            periodic admin probe sweep
+    tasks.ts                 registry of user-initiated operations + cancellation
   routes/api.ts              HTTP handlers; thin
 src/web/
   main.tsx  App.tsx  api.ts  router.ts  index.css  index.html
-  components/  Backdrop, Layout, StatusDot, SignalDot, CapabilityBadge, format.ts
+  components/  Backdrop, Layout, StatusDot, SignalDot, CapabilityBadge,
+               RadioTaskBanner, format.ts
   pages/       Login, Fleet, NodeDetail
   pages/fleetOrdering.ts   pure filter + comparator logic for the fleet list
   pages/fleetView.ts       the list's search/sort selections, persisted per tab
@@ -547,6 +549,22 @@ bloom over near-black.
   `undefined` and sorting the list by `NaN`. Reads and writes are both wrapped: storage can
   simply throw in a private window or with site data blocked, and the list has to render
   anyway — it just stops remembering.
+- **Every user-initiated mesh operation registers a task** (`mesh/tasks.ts`) so the UI can
+  say what the radio is busy with, from any page, and offer a way out. A mesh round trip
+  runs to tens of seconds and the operator has usually navigated elsewhere by then, so a
+  spinner on the originating button is not enough on its own.
+  **Adding an operation** — traceroute is next — means: a new `RadioTaskKind` in
+  `shared/types.ts`, an `AbortSignal` parameter threaded down to the `AdminClient.request`
+  that waits, and `tasks.start(...)` / `tasks.finish(...)` in a `try/finally` around it.
+  The `finally` is not optional; miss it and the banner never clears.
+  Background sweeps from the capability prober are deliberately *not* registered: nobody is
+  waiting on them, and a banner appearing on its own schedule teaches people to ignore
+  banners.
+  **Cancelling cannot recall a packet already on the air.** It abandons the wait, so a late
+  reply arrives unmatched and is dropped. That makes cancelling a *read* clean and
+  cancelling a *write* ambiguous — the config route records the operation as failed with
+  "the change may still have been applied" rather than claiming it did not happen, and does
+  not touch the admin verdict, because nothing was established either way.
 - **Mesh writes are never optimistic.** Every remote operation is a row in
   `admin_operations` with pending → confirmed | failed, surfaced in the UI. Pending rows
   are failed at startup, since they belong to a dead process with no waiter.

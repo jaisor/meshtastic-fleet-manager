@@ -121,6 +121,29 @@ export interface RadioStatus {
 }
 
 /**
+ * A user-initiated operation currently occupying the radio.
+ *
+ * These are mesh round trips measured in tens of seconds, so the UI
+ * surfaces them globally and offers a way to stop waiting. Extend
+ * `RadioTaskKind` as new operations are added -- traceroute is the obvious
+ * next one.
+ */
+export type RadioTaskKind = "probe" | "config";
+
+export interface RadioTask {
+  id: number;
+  kind: RadioTaskKind;
+  /** Short human description for the banner, e.g. "Checking admin access". */
+  label: string;
+  nodeNum: number;
+  nodeId: string;
+  nodeName: string | null;
+  startedAt: number;
+  /** How long the server will wait before giving up on its own. */
+  timeoutSeconds: number;
+}
+
+/**
  * The bounded set of remotely writable settings. Deliberately small: every
  * field here is reversible and non-destructive. Widening this type is a
  * decision, not a detail.

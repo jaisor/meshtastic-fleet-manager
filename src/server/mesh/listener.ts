@@ -190,6 +190,10 @@ export class MeshListener extends EventEmitter {
         this.status.connected
       ) {
         this.options.logger.warn("radio disconnected");
+        // Emitted before teardown so anything waiting on the mesh can give
+        // up now rather than sit out its full timeout against a radio that
+        // is no longer there.
+        this.emit("disconnected");
         void this.teardown().then(() => this.scheduleReconnect());
       }
     });

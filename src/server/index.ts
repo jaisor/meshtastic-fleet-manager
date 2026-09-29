@@ -12,6 +12,7 @@ import { MeshListener } from "./mesh/listener.js";
 import { attachIngest } from "./mesh/ingest.js";
 import { AdminClient } from "./mesh/admin.js";
 import { CapabilityProber } from "./mesh/capability.js";
+import { RadioTaskRegistry } from "./mesh/tasks.js";
 import { registerAuthRoutes, requireSession, SessionStore } from "./auth.js";
 import { registerApiRoutes } from "./routes/api.js";
 
@@ -87,6 +88,17 @@ async function main(): Promise<void> {
   });
   admin.attach();
 
+  const tasks = new RadioTaskRegistry();
+
+  // A task waiting on a radio that just vanished will never be answered;
+  // abandon them so the banner clears instead of hanging until timeout.
+  listener.on("disconnected", () => {
+    const cancelled = tasks.cancelAll();
+    if (cancelled > 0) {
+      app.log.warn({ cancelled }, "radio lost; abandoned in-flight tasks");
+    }
+  });
+
   const prober = new CapabilityProber({
     nodes,
     admin,
@@ -111,6 +123,7 @@ async function main(): Promise<void> {
       listener,
       admin,
       prober,
+      tasks,
     });
   });
 

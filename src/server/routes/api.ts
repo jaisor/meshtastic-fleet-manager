@@ -5,6 +5,7 @@ import type { AdminOperationRepository } from "../db/repositories/adminOperation
 import { AdminError, type AdminClient } from "../mesh/admin.js";
 import type { CapabilityProber } from "../mesh/capability.js";
 import type { MeshListener } from "../mesh/listener.js";
+import { TaskCancelledError, type RadioTaskRegistry } from "../mesh/tasks.js";
 import { parseNodeId } from "../mesh/nodeId.js";
 import type { NodeConfigUpdate } from "../../shared/types.js";
 
@@ -26,6 +27,7 @@ export interface ApiDependencies {
   listener: MeshListener;
   admin: AdminClient;
   prober: CapabilityProber;
+  tasks: RadioTaskRegistry;
 }
 
 export function registerApiRoutes(
@@ -35,7 +37,33 @@ export function registerApiRoutes(
   app.get("/api/status", async () => ({
     radio: deps.listener.getStatus(),
     staleAfter: deps.config.fleet.stale_after,
+    // Polled by the UI to drive the "radio busy" banner, so this endpoint
+    // is also what makes a long operation visible from any page.
+    tasks: deps.tasks.list(),
   }));
+
+  /**
+   * Stops waiting on an operation and releases the radio.
+   *
+   * Cancelling cannot recall a packet already transmitted; what it does is
+   * abandon the wait, so a late reply is simply ignored. Returns 409 when
+   * the task already finished, which the UI can lose fairly: the banner is
+   * polled, so an operation may complete between a poll and the click.
+   */
+  app.post<{ Params: { id: string } }>(
+    "/api/tasks/:id/cancel",
+    async (request, reply) => {
+      const id = Number(request.params.id);
+      if (!Number.isInteger(id)) {
+        return reply.status(400).send({ error: "malformed task id" });
+      }
+      if (!deps.tasks.cancel(id)) {
+        return reply.status(409).send({ error: "task already finished" });
+      }
+      request.log.info({ taskId: id }, "radio task cancelled by operator");
+      return { cancelled: true };
+    },
+  );
 
   app.get("/api/nodes", async () => ({ nodes: deps.nodes.list() }));
 
@@ -80,9 +108,28 @@ export function registerApiRoutes(
       }
 
       deps.admin.forget(nodeNum);
-      const capability = await deps.admin.probe(nodeNum);
-      deps.nodes.setAdminCapability(nodeNum, capability);
-      return { capability };
+      const node = deps.nodes.get(nodeNum);
+      const { task, signal } = deps.tasks.start({
+        kind: "probe",
+        label: "Checking admin access",
+        nodeNum,
+        nodeName: node?.longName ?? node?.shortName ?? null,
+        timeoutSeconds: deps.config.fleet.admin_probe_timeout,
+      });
+
+      try {
+        const capability = await deps.admin.probe(nodeNum, signal);
+        deps.nodes.setAdminCapability(nodeNum, capability);
+        return { capability };
+      } catch (cause) {
+        // A cancelled probe establishes nothing, so no verdict is recorded.
+        if (cause instanceof TaskCancelledError) {
+          return reply.status(409).send({ error: "probe cancelled" });
+        }
+        throw cause;
+      } finally {
+        deps.tasks.finish(task.id);
+      }
     },
   );
 
@@ -116,9 +163,16 @@ export function registerApiRoutes(
         .map(([key, value]) => `${key}=${value}`)
         .join(", ");
       const operationId = deps.operations.create(nodeNum, "setOwner", detail);
+      const { task, signal } = deps.tasks.start({
+        kind: "config",
+        label: "Applying configuration",
+        nodeNum,
+        nodeName: node.longName ?? node.shortName ?? null,
+        timeoutSeconds: deps.config.fleet.admin_probe_timeout,
+      });
 
       try {
-        await deps.admin.setOwner(nodeNum, update.value);
+        await deps.admin.setOwner(nodeNum, update.value, signal);
         deps.operations.settle(operationId, "confirmed", null);
 
         // The remote is now authoritative for these names; reflect them
@@ -133,6 +187,24 @@ export function registerApiRoutes(
 
         return { operationId, state: "confirmed" as const };
       } catch (cause) {
+        // Cancelling a write is the ambiguous case: the packet may already
+        // be on the air, so the change may yet land on the node. Record it
+        // as such rather than claiming it failed, and do not touch the
+        // admin verdict -- nothing was established either way.
+        if (cause instanceof TaskCancelledError) {
+          deps.operations.settle(
+            operationId,
+            "failed",
+            "cancelled by operator; the change may still have been applied",
+          );
+          return reply.status(409).send({
+            error:
+              "Cancelled. The request may already have reached the node, so re-check its name before retrying.",
+            operationId,
+            state: "failed" as const,
+          });
+        }
+
         const message =
           cause instanceof Error ? cause.message : "unknown failure";
         deps.operations.settle(operationId, "failed", message);
@@ -145,6 +217,8 @@ export function registerApiRoutes(
         return reply
           .status(502)
           .send({ error: message, operationId, state: "failed" as const });
+      } finally {
+        deps.tasks.finish(task.id);
       }
     },
   );
