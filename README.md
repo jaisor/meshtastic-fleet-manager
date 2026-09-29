@@ -33,9 +33,10 @@ The console is on <http://localhost:8080>.
 
 Two things in `docker/compose.yaml` need editing for your host:
 
-1. **The serial device.** Find the stable path with `ls -l /dev/serial/by-id/` and use it
-   in both the `devices:` mapping and `serial.port` in your config. `/dev/ttyUSB0`
-   renumbers on replug; the by-id path does not.
+1. **The serial device.** Find the stable path with `ls -l /dev/serial/by-id/` and put it
+   in the `devices:` mapping. `/dev/ttyUSB0` and `/dev/ttyACM0` renumber on replug; the
+   by-id path does not. See [Serial paths with colons](#serial-paths-with-colons) below —
+   many by-id names contain them.
 2. **The serial group.** The container runs as an unprivileged user and needs the host's
    serial group to open the device. Get the numeric GID with
    `getent group dialout | cut -d: -f3` and put it in `group_add`. A wrong value shows up
@@ -104,6 +105,85 @@ node -e "import('./dist/server/config.js').then(m=>console.log(m.hashPassword('y
 Set `server.secure_cookies: true` only when the console is reached over HTTPS. Browsers
 silently drop `Secure` cookies on a plain-HTTP origin, and the symptom is a login form that
 appears to do nothing.
+
+## Serial paths with colons
+
+Many `/dev/serial/by-id/` names contain colons — an ESP32-S3 builds its name from the
+device MAC, so you get something like:
+
+```
+/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_F8:5B:1B:BE:C6:F0-if00
+```
+
+The two config files treat that very differently.
+
+### config.yaml — no escaping needed
+
+YAML only gives a colon special meaning when it is followed by a *space*. These colons are
+not, so the path is an ordinary scalar:
+
+```yaml
+serial:
+  port: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_F8:5B:1B:BE:C6:F0-if00
+```
+
+Quoting it is harmless if you prefer the reassurance — single quotes are literal in YAML,
+so `'…F8:5B:…'` needs no backslashes either. All three forms parse to the identical string.
+
+Remember this is the path **as the process sees it**: the real host path when running on
+bare metal, but the container-side `target` when running under Docker (see below).
+
+### compose.yaml — use the long syntax
+
+The familiar `"host:container"` form splits on colons, so a by-id path with colons in it is
+ambiguous. Compose does not try to guess; it refuses outright:
+
+```
+confusing device mapping, please use long syntax: /dev/serial/by-id/usb-…F8:5B:…-if00:/dev/meshtastic
+```
+
+There is no escape character that fixes the short form. Use the long syntax, where the path
+is a value rather than part of a delimited string:
+
+```yaml
+devices:
+  - source: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_F8:5B:1B:BE:C6:F0-if00
+    target: /dev/meshtastic
+    permissions: rw
+```
+
+`source` and `target` are required; `permissions` is optional. No quoting is required.
+
+Giving the container a clean `target` is the point: pick a colon-free name like
+`/dev/meshtastic` and the messy path appears exactly once, in `source`. Your `config.yaml`
+then just says:
+
+```yaml
+serial:
+  port: /dev/meshtastic
+```
+
+### If your Compose is too old for the long syntax
+
+The long `devices:` syntax needs Compose v2.29+ (Docker Compose v5 ships it). On an older
+install — an aging Raspberry Pi, say — give the device a colon-free alias on the host with
+a udev rule instead:
+
+```
+# /etc/udev/rules.d/99-meshtastic.rules
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", SYMLINK+="meshtastic"
+```
+
+Reload with `sudo udevadm control --reload-rules && sudo udevadm trigger`, then use the
+short syntax against the alias, which has no colons to trip over:
+
+```yaml
+devices:
+  - "/dev/meshtastic:/dev/meshtastic"
+```
+
+Find your `idVendor` with `lsusb` or `udevadm info -a -n /dev/ttyACM0 | grep idVendor`.
+`303a` is Espressif; `1a86` is the CH340/CH9102 bridge on many boards.
 
 ## Running without a radio
 

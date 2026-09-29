@@ -42,9 +42,25 @@ serial:
   # Path to the USB-attached local Meshtastic node, or "auto" to pick the
   # first device with a known Meshtastic USB vendor ID.
   #
-  # Prefer a by-id path: /dev/ttyUSB0 renumbers on replug, and with two
-  # radios attached "the first one" is not stable.
-  port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXXXXXX-if00
+  # This is the path as the PROCESS sees it:
+  #
+  #   Under Docker  -> the `target` from the devices mapping in
+  #                    docker/compose.yaml, e.g. /dev/meshtastic.
+  #   Bare metal    -> the real host path.
+  #
+  # Prefer a by-id path over /dev/ttyUSB0 or /dev/ttyACM0, which renumber
+  # on replug; with two radios attached "the first one" is not stable.
+  # List them with:  ls -l /dev/serial/by-id/
+  #
+  # by-id names often contain colons (an ESP32-S3 builds one from its MAC).
+  # That needs no escaping here -- YAML only treats a colon specially when
+  # it is followed by a space -- though quoting it does no harm:
+  #
+  #   port: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_F8:5B:1B:BE:C6:F0-if00
+  #
+  # Colons DO break the `devices:` short syntax in compose.yaml; that file
+  # uses the long syntax instead.
+  port: /dev/meshtastic
   baud: 115200
 
   # Seconds between reconnect attempts; the last value repeats forever.

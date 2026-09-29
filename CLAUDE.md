@@ -372,6 +372,16 @@ Failed logins sleep ~750ms before replying, which is the whole of the rate limit
 - Serial passthrough is the sharp edge: a `devices:` mapping using a
   `/dev/serial/by-id/...` path, plus `group_add` with the host's `dialout` GID. A wrong
   GID surfaces as `EACCES` on open.
+- **`devices:` uses the long syntax (`source` / `target` / `permissions`), not
+  `"host:container"`.** by-id names routinely contain colons — an ESP32-S3 builds one from
+  its MAC — and the short form splits on colons, so Compose rejects the whole file with
+  *"confusing device mapping, please use long syntax"*. No escape character fixes the short
+  form. `target` is required, `permissions` is optional, quoting is unnecessary. Needs
+  Compose v2.29+; the README documents a udev-alias fallback for older installs.
+- **`serial.port` in config.yaml is the container-side `target`**, not the host path. With
+  a clean target like `/dev/meshtastic` the colon-bearing path appears exactly once, in
+  compose's `source`. In YAML itself colons need no escaping at all — a colon is only
+  special when followed by a space.
 
 ---
 

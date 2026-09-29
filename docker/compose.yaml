@@ -18,10 +18,25 @@ services:
       - fleet-data:/data
 
     devices:
-      # Prefer the stable by-id path over /dev/ttyUSB0, which renumbers on
-      # replug. List yours with:  ls -l /dev/serial/by-id/
-      # The path inside the container must match serial.port in config.yaml.
-      - "/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXXXXXX-if00:/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXXXXXX-if00"
+      # Long syntax, not the usual "host:container" string, because by-id
+      # paths routinely contain colons -- an ESP32-S3's is built from its
+      # MAC, e.g. ..._xxxxxx-if00. The short form splits on ":"
+      # and Compose rejects such a path outright with "confusing device
+      # mapping, please use long syntax". The long form takes the path as
+      # a value, so no escaping is needed and no quoting is required
+      # (a colon only has meaning in YAML when followed by a space).
+      #
+      # Needs Compose v2.29+ / Docker Compose v5. On anything older, give
+      # the device a colon-free alias with a udev rule and use the short
+      # form against that -- see README.
+      #
+      # List your devices with:  ls -l /dev/serial/by-id/
+      - source: /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_F8:xxxxxx-if00
+        # The container sees a clean, stable name. serial.port in
+        # config.yaml must match THIS, not the source -- which keeps the
+        # colons confined to this one line.
+        target: /dev/meshtastic
+        permissions: rw
 
     group_add:
       # The container runs as the unprivileged `node` user, which needs the
