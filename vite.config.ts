@@ -30,7 +30,7 @@ function apiPort(): number {
     // No config yet, or unreadable. The server would refuse to start on a
     // bad config anyway, so fall through to the documented default.
   }
-  return 8080;
+  return 8432;
 }
 
 /**
@@ -38,7 +38,7 @@ function apiPort(): number {
  * production, so it builds into `dist/web` next to `dist/server`.
  *
  * In development Vite serves it on :5173 and proxies `/api` to the server
- * on :8080, which keeps the session cookie same-origin -- a cross-origin
+ * on the API port, which keeps the session cookie same-origin -- a cross-origin
  * setup would need CORS plus `SameSite=None`, and the cookie is
  * `SameSite=strict` on purpose.
  */

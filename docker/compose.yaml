@@ -7,7 +7,10 @@ services:
     restart: unless-stopped
 
     ports:
-      - "8080:8080"
+      # host:container. The container listens on whatever server.port says
+      # in the mounted config (8432 by default); only the left number is
+      # yours to choose.
+      - "18432:8432"
 
     volumes:
       # The config is read once at startup; a change needs a restart.

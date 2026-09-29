@@ -71,13 +71,22 @@ COPY package.json ./
 RUN mkdir -p /config /data && chown -R node:node /config /data
 
 USER node
-EXPOSE 8080
+
+# Documentation only -- it publishes nothing, and the real port comes from
+# server.port in the mounted config. Matches the default in that config.
+EXPOSE 8432
 
 # Reading the status endpoint proves the HTTP server and the SQLite handle
 # are both alive. It deliberately does not assert the radio is connected --
 # an unplugged radio is a condition to display, not a reason to kill the
-# container and lose the history it has already collected.
+# container and lose the history it has already collected. 401 counts as
+# healthy: the auth gate answering is exactly the proof we want.
+#
+# The port is read from the same config the server reads rather than
+# hardcoded. Hardcoding it means that changing server.port silently marks
+# the container permanently unhealthy, which then blocks anything with a
+# `depends_on: service_healthy` on it.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:8080/api/status').then(r=>process.exit(r.status===401||r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD ["node", "-e", "const {parse}=require('yaml');const {readFileSync}=require('fs');let p=8432;try{p=parse(readFileSync(process.env.MFM_CONFIG,'utf8'))?.server?.port??p}catch{};fetch('http://127.0.0.1:'+p+'/api/status').then(r=>process.exit(r.status===401||r.ok?0:1)).catch(()=>process.exit(1))"]
 
 CMD ["node", "dist/server/index.js"]

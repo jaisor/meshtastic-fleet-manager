@@ -64,7 +64,7 @@ prebuilds become a problem.
 
 ```sh
 npm install           # see §4 before touching install flags
-npm run dev           # server :8080 (tsx watch) + Vite UI :5173 proxying /api
+npm run dev           # server :8432 (tsx watch) + Vite UI :5173 proxying /api
 npm run build         # tsc -> dist/server, vite -> dist/web
 npm start             # run the built server, which serves the built UI
 npm run typecheck     # both halves
@@ -85,10 +85,10 @@ config is gitignored — copy `config/config.example.yaml` to create it.
 - **The proxy target port is read from `config/config.yaml`**, not hardcoded, with
   `MFM_API_PORT` as an override. The two disagreeing is miserable to debug: Vite proxies
   to whatever else answers on the stale port and the browser shows a stranger's HTTP
-  errors. On this machine port **8080 is held by `AntecHardwareMonitorWindowsService.exe`**,
-  which answers 501 to everything — so the default port is a bad choice here. `server.port`
-  in the dev config should be something unlikely to collide. A port clash now exits with a
-  named fatal message rather than a bare `EADDRINUSE` stack.
+  errors. **The default is 8432, not the conventional 8080** — on this machine 8080 is held
+  by `AntecHardwareMonitorWindowsService.exe`, which answers 501 to everything, and that is
+  a thoroughly confusing way to lose an afternoon. A port clash now exits with a named
+  fatal message rather than a bare `EADDRINUSE` stack.
 
 **Environment note:** `node`/`npm` are on PATH via nvm4w, so the npm commands work
 directly. Docker Desktop is often not running, so treat the container path as the
@@ -369,6 +369,12 @@ Failed logins sleep ~750ms before replying, which is the whole of the rate limit
 - The healthcheck reads `/api/status` and accepts 401 as healthy. It deliberately does not
   assert the radio is connected — an unplugged radio is a condition to display, not a
   reason to kill the container and lose the history already collected.
+- **One port number, one place.** `server.port` in the mounted config (default **8432**) is
+  the only definition. The healthcheck parses it out of that same file rather than
+  hardcoding it, because a hardcoded value means changing the port silently marks the
+  container permanently unhealthy and blocks any `depends_on: service_healthy`. `EXPOSE` is
+  documentation only and publishes nothing. Compose maps `18432:8432`; only the left-hand
+  number is a free choice, the right-hand one must equal `server.port`.
 - Serial passthrough is the sharp edge: a `devices:` mapping using a
   `/dev/serial/by-id/...` path, plus `group_add` with the host's `dialout` GID. A wrong
   GID surfaces as `EACCES` on open.
@@ -478,6 +484,15 @@ the production build served by Fastify, which is why the `/api` proxy-prefix bug
 Login, fleet render and the degraded banner all work through the Vite dev server with no
 failed requests and no console errors.
 
+**The Docker image is built and verified** (2026-09-28, once Docker Desktop was running):
+`docker build --check` clean, all four stages build, and a running container serves the UI
+on `18432:8432` with login, the degraded banner and the empty-fleet state all working —
+no console errors, no failed requests. Confirmed inside the container: it runs as
+`uid=1000(node)`, `/data` is writable with `fleet.db`, `-wal` and `-shm` all present, and
+the healthcheck reports `healthy` with exit 0. The healthcheck's config-reading was proved
+rather than assumed by running a second container with `server.port: 9001` — it went
+healthy on 9001, which a hardcoded 8432 could not have done.
+
 Degraded mode is verified in all three states: `serial.enabled: false`, and a configured
 port that does not exist (the server stays up, keeps retrying, and surfaces the real
 `Opening /dev/...: Unknown error code 3`), and recovery — with the status endpoint stubbed
@@ -498,10 +513,8 @@ and a bad request.
   was applied. This is the single most likely thing to be wrong. If it is, treat a write
   timeout as "sent, unconfirmed" — a distinct state, not a success.
 - The `auto` serial-port heuristic and its USB vendor-ID list.
-- **The Docker image has never been built** — Docker Desktop was not running. The
-  `npm ci --ignore-scripts` + `npm rebuild` sequence was verified on the host, including
-  the `--omit=dev` variant, but the image itself, the healthcheck, the device passthrough
-  and the `group_add` GID are all unproven.
+- **Device passthrough and the `group_add` GID**, which are the only parts of the container
+  that need real hardware. Everything else about the image is now verified (below).
 
 ---
 

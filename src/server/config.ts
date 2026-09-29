@@ -30,7 +30,7 @@ const schema = z.object({
   server: z
     .object({
       host: z.string().default("0.0.0.0"),
-      port: z.number().int().min(1).max(65535).default(8080),
+      port: z.number().int().min(1).max(65535).default(8432),
       session_secret: z.string().min(16).optional(),
       session_ttl: duration.default(12 * 3600),
       /**

@@ -9,11 +9,18 @@
 server:
   host: 0.0.0.0
 
-  # 8080 is a popular port and is often already taken by unrelated software
-  # (hardware-monitor agents, dev proxies, Docker). If startup reports the
-  # port is in use, pick another one here -- the Vite dev proxy reads this
-  # value, so nothing else needs changing.
-  port: 8080
+  # The port the SERVER listens on. Under Docker this is the container-side
+  # port; docker/compose.yaml maps it to a host port (18432 by default), so
+  # change that mapping, not this, to alter what you browse to.
+  #
+  # 8080 is deliberately avoided as the default: it is commonly claimed by
+  # unrelated software (hardware-monitor agents, dev proxies, Docker), and a
+  # clash there is confusing to diagnose -- the dev proxy happily forwards
+  # to whatever else answers.
+  #
+  # Everything that needs this value reads it from here: the Vite dev proxy
+  # and the container healthcheck included. Changing it is a one-line edit.
+  port: 8432
 
   # Signs the session cookie. Generate with:
   #   openssl rand -hex 32

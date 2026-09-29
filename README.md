@@ -29,9 +29,13 @@ $EDITOR config/config.yaml          # set auth.password, session_secret and seri
 docker compose -f docker/compose.yaml up --build
 ```
 
-The console is on <http://localhost:8080>.
+The console is on <http://localhost:18432>.
 
-Two things in `docker/compose.yaml` need editing for your host:
+That is the host side of the `ports:` mapping in `docker/compose.yaml` (`18432:8432`).
+The container listens on whatever `server.port` says in your config — 8432 by default.
+To browse on a different port, change only the left-hand number.
+
+Three things in `docker/compose.yaml` may need editing for your host:
 
 1. **The serial device.** Find the stable path with `ls -l /dev/serial/by-id/` and put it
    in the `devices:` mapping. `/dev/ttyUSB0` and `/dev/ttyACM0` renumber on replug; the
@@ -41,13 +45,15 @@ Two things in `docker/compose.yaml` need editing for your host:
    serial group to open the device. Get the numeric GID with
    `getent group dialout | cut -d: -f3` and put it in `group_add`. A wrong value shows up
    as `EACCES` on the serial port.
+3. **The published port**, if 18432 is taken. Only the left half of `18432:8432`
+   is yours to pick; the right half must match `server.port` in the config.
 
 ## Running without Docker
 
 ```sh
 npm install
 cp config/config.example.yaml config/config.yaml
-npm run dev          # API on :8080, UI on :5173 with hot reload
+npm run dev          # API on :8432, UI on :5173 with hot reload
 ```
 
 `npm run dev` reads `config/config.yaml` from the repo. Set `MFM_CONFIG` to override.
@@ -55,8 +61,9 @@ npm run dev          # API on :8080, UI on :5173 with hot reload
 The Vite dev server proxies `/api/` to whatever port `server.port` names in that config, so
 the two cannot drift apart. Set `MFM_API_PORT` if the API is running somewhere else.
 
-If startup reports the port is already in use, pick another one in `server.port` — 8080 in
-particular is claimed by unrelated software on a fair number of machines.
+If startup reports the port is already in use, pick another one in `server.port`. The
+default is 8432 rather than the conventional 8080 precisely because 8080 is claimed by
+unrelated software on a fair number of machines.
 
 For a production run outside Docker:
 
@@ -67,7 +74,7 @@ npm start
 
 | Command | What it does |
 | --- | --- |
-| `npm run dev` | Server with reload on :8080, Vite UI on :5173 proxying `/api` |
+| `npm run dev` | Server with reload on :8432, Vite UI on :5173 proxying `/api` |
 | `npm run build` | Compiles the server to `dist/server`, bundles the UI to `dist/web` |
 | `npm start` | Runs the built server, which serves the built UI |
 | `npm run typecheck` | Typechecks both halves |
@@ -84,7 +91,7 @@ The essentials:
 
 ```yaml
 server:
-  port: 8080
+  port: 8432
   session_secret: "<openssl rand -hex 32>"
 auth:
   password: "change-me"        # or password_hash, which is preferred
