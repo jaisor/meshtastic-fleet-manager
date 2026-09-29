@@ -1,3 +1,4 @@
+import type { UserRole } from "../shared/roles";
 import type {
   AdminCapability,
   AdminOperation,
@@ -5,7 +6,10 @@ import type {
   NodeConfigUpdate,
   PositionPoint,
   DiscoverySummary,
+  ManagedUser,
+  MaintenanceResult,
   RadioStatus,
+  SessionResponse,
   RadioTask,
   TelemetryPoint,
 } from "../shared/types";
@@ -67,16 +71,40 @@ export interface NodeDetailResponse {
 }
 
 export const api = {
-  getSession: () => request<{ authenticated: boolean }>("/api/session"),
+  getSession: () => request<SessionResponse>("/api/session"),
 
-  login: (password: string) =>
-    request<{ authenticated: boolean }>("/api/session", {
+  login: (username: string, password: string) =>
+    request<SessionResponse>("/api/session", {
       method: "POST",
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ username, password }),
     }),
 
-  logout: () =>
-    request<{ authenticated: boolean }>("/api/session", { method: "DELETE" }),
+  logout: () => request<SessionResponse>("/api/session", { method: "DELETE" }),
+
+  listUsers: () => request<{ users: ManagedUser[] }>("/api/users"),
+
+  createUser: (username: string, password: string, role: UserRole) =>
+    request<{ user: ManagedUser }>("/api/users", {
+      method: "POST",
+      body: JSON.stringify({ username, password, role }),
+    }),
+
+  updateUser: (id: number, changes: { role?: UserRole; password?: string }) =>
+    request<{ user: ManagedUser; sessionsRevoked: number }>(`/api/users/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(changes),
+    }),
+
+  deleteUser: (id: number) =>
+    request<{ deleted: boolean }>(`/api/users/${id}`, { method: "DELETE" }),
+
+  purge: (scope: "nodes" | "history") =>
+    request<{ purged: MaintenanceResult }>("/api/admin/purge", {
+      method: "POST",
+      // The server requires the scope echoed back; the UI collects it from a
+      // typed confirmation field before ever calling this.
+      body: JSON.stringify({ scope, confirm: scope }),
+    }),
 
   getStatus: () => request<StatusResponse>("/api/status"),
 
@@ -89,6 +117,12 @@ export const api = {
 
   getNode: (nodeId: string) =>
     request<NodeDetailResponse>(`/api/nodes/${encodeURIComponent(nodeId)}`),
+
+  refreshNode: (nodeId: string) =>
+    request<{
+      received: { identity: boolean; metrics: boolean; position: boolean };
+      node: FleetNode;
+    }>(`/api/nodes/${encodeURIComponent(nodeId)}/refresh`, { method: "POST" }),
 
   probeNode: (nodeId: string) =>
     request<{ capability: AdminCapability }>(

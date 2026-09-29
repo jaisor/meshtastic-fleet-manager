@@ -81,4 +81,26 @@ export const migrations: Migration[] = [
       ALTER TABLE nodes ADD COLUMN rssi REAL;
     `,
   },
+  {
+    name: "003_users",
+    sql: `
+      -- Accounts beyond the built-in admin, which lives in config.yaml so
+      -- the console is reachable even with an empty or restored database.
+      -- The name 'admin' is reserved at the application layer; a row here
+      -- must never be able to shadow it.
+      CREATE TABLE users (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        username       TEXT NOT NULL,
+        password_hash  TEXT NOT NULL,
+        role           TEXT NOT NULL,
+        created_at     INTEGER NOT NULL,
+        last_login_at  INTEGER
+      );
+
+      -- Usernames are compared case-insensitively, so uniqueness has to be
+      -- too: otherwise "Jordan" and "jordan" become two accounts that both
+      -- answer to the same login.
+      CREATE UNIQUE INDEX idx_users_username ON users(username COLLATE NOCASE);
+    `,
+  },
 ];

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, RefreshCw, RotateCw } from "lucide-react";
 import { api, ApiError, type NodeDetailResponse } from "../api";
 import { CapabilityBadge } from "../components/CapabilityBadge";
 import { SignalDot } from "../components/SignalDot";
@@ -24,6 +24,8 @@ export function NodeDetail({
 }) {
   const [detail, setDetail] = useState<NodeDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -37,6 +39,33 @@ export function NodeDetail({
   useEffect(() => {
     void load();
   }, [load]);
+
+  async function refresh() {
+    setRefreshing(true);
+    setRefreshNote(null);
+    try {
+      const { received } = await api.refreshNode(nodeId);
+      const got = [
+        received.identity && "identity",
+        received.metrics && "metrics",
+        received.position && "position",
+      ].filter(Boolean);
+      // Say what came back rather than a bare "done": a node that answered
+      // nothing looks identical to a successful refresh otherwise.
+      setRefreshNote(
+        got.length === 0
+          ? "The node did not answer. It may be asleep or out of range."
+          : `Updated: ${got.join(", ")}.`,
+      );
+      await load();
+    } catch (cause) {
+      setRefreshNote(
+        cause instanceof ApiError ? cause.message : "the request did not complete",
+      );
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   if (error) return <p className="card p-6 text-red-400">{error}</p>;
   if (!detail) return <p className="p-6 text-neutral-500">Loading node…</p>;
@@ -68,11 +97,36 @@ export function NodeDetail({
             </p>
           </div>
           <div className="flex flex-col items-end gap-2">
+            {!node.isLocal && (
+              <button
+                type="button"
+                onClick={() => void refresh()}
+                disabled={refreshing || !radioConnected}
+                title={
+                  radioConnected
+                    ? "Ask the node for its current identity, metrics and position"
+                    : "Unavailable while the local radio is disconnected — this goes out over the mesh."
+                }
+                className="mb-1 inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-3 py-1.5 text-xs text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-neutral-800 disabled:hover:text-neutral-400"
+              >
+                <RotateCw
+                  aria-hidden
+                  className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`}
+                />
+                {refreshing ? "Asking the node…" : "Refresh from node"}
+              </button>
+            )}
             <StatusDot state={node.state} />
             {!node.isLocal && <SignalDot signal={node.signal} />}
             {!node.isLocal && <CapabilityBadge capability={node.adminCapability} />}
           </div>
         </div>
+
+        {refreshNote && (
+          <p role="status" className="mt-4 text-sm text-amber-200/90">
+            {refreshNote}
+          </p>
+        )}
 
         <dl className="mt-6 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-4">
           <Field label="Last heard" title={absoluteTime(node.lastHeardAt)}>

@@ -93,6 +93,18 @@ const schema = z.object({
        * case-insensitively. Implies require_message.
        */
       message_contains: z.string().min(1).nullable().default(null),
+      /**
+       * Ask a newly discovered node for its names, hardware, role and
+       * metrics instead of waiting hours for its next broadcast. Costs two
+       * transmissions per new node, so it can be turned off on a busy mesh.
+       */
+      probe_new_nodes: z.boolean().default(true),
+      /**
+       * Admit nodes the radio only ever witnessed over MQTT rather than
+       * hearing on the air. They cannot have transmitted on your channel,
+       * so they are excluded by default.
+       */
+      include_mqtt: z.boolean().default(false),
     })
     .prefault({}),
   fleet: z
@@ -120,6 +132,7 @@ export interface DiscoveryRules {
   requireMessage: boolean;
   /** Already lowercased, ready to compare. */
   messageContains: string | null;
+  includeMqtt: boolean;
 }
 
 export type AppConfig = z.infer<typeof schema> & {
@@ -201,6 +214,7 @@ export function loadConfig(path: string): AppConfig {
       config.discovery.require_message ||
       config.discovery.message_contains !== null,
     messageContains: config.discovery.message_contains?.toLowerCase() ?? null,
+    includeMqtt: config.discovery.include_mqtt,
   };
 
   return {

@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from "fastify";
 import type { NodeRepository } from "../db/repositories/nodes.js";
 import type { AdminClient } from "./admin.js";
 import type { MeshListener } from "./listener.js";
+import { logNode } from "./nodeId.js";
 
 /**
  * Periodically re-establishes which nodes the local node may administer.
@@ -71,7 +72,7 @@ export class CapabilityProber {
         const capability = await this.options.admin.probe(node.nodeNum);
         this.options.nodes.setAdminCapability(node.nodeNum, capability);
         this.options.logger.info(
-          { nodeId: node.nodeId, capability },
+          { ...logNode(node.nodeNum), capability },
           "admin capability probed",
         );
 

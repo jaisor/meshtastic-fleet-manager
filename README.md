@@ -8,6 +8,8 @@ web console for viewing their state and remotely reconfiguring them.
 
 - **Passive discovery.** Nodes appear as the local radio hears them. No enrollment step —
   and optionally narrowed to a channel, to nodes that send a message, or to a keyword in it.
+  A node discovered with nothing but its number is asked for its name, hardware and metrics
+  rather than leaving a blank row until its next broadcast.
 - **Persistent state.** Identity, telemetry, and position survive restarts, so the console
   is useful before the next packet arrives.
 - **Admin-capability probing.** Establishes which nodes accept admin messages from the
@@ -143,6 +145,27 @@ serial:
 database:
   path: /data/fleet.db
 ```
+
+`auth` defines the built-in **admin** account. It lives in the config rather than the
+database so the console stays reachable if the database is lost or its last admin account
+is deleted; it cannot be renamed, demoted or removed from inside the app, and no other
+account may take the name `admin`.
+
+Further accounts are created from the **Administration** page — the menu under your
+username, visible to admins — with one of three roles:
+
+| Role | Can do |
+| --- | --- |
+| `admin` | Everything, including accounts and clearing the node database |
+| `manager` | Read everything, and use the radio — probe nodes, change their configuration |
+| `viewer` | Read-only; never transmits |
+
+Changing a role or resetting a password signs that account out immediately, so a demotion
+takes effect at once rather than whenever their session happens to expire.
+
+That page also holds the destructive actions: clearing telemetry and position history, or
+deleting all nodes. Both require the scope typed to confirm, and neither touches accounts.
+Discovery starts again from whatever the radio hears next.
 
 A plaintext `auth.password` is hashed at load time and never written to the database or a
 log line, but it still sits in the file. To avoid that, generate a hash and use

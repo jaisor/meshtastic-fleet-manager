@@ -12,9 +12,12 @@ import { MeshListener } from "./mesh/listener.js";
 import { attachIngest } from "./mesh/ingest.js";
 import { AdminClient } from "./mesh/admin.js";
 import { CapabilityProber } from "./mesh/capability.js";
+import { NodeEnricher } from "./mesh/enrich.js";
 import { RadioTaskRegistry } from "./mesh/tasks.js";
 import { registerAuthRoutes, requireSession, SessionStore } from "./auth.js";
+import { UserRepository } from "./db/repositories/users.js";
 import { registerApiRoutes } from "./routes/api.js";
+import { registerAdminRoutes } from "./routes/admin.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -65,6 +68,7 @@ async function main(): Promise<void> {
     offlineAfter: config.fleet.offline_after,
   });
   const operations = new AdminOperationRepository(db);
+  const users = new UserRepository(db);
 
   // Anything still pending belongs to a previous process and has no waiter.
   const abandoned = operations.failAllPending("interrupted by server restart");
@@ -79,7 +83,16 @@ async function main(): Promise<void> {
     enabled: config.serial.enabled,
     logger: app.log,
   });
-  attachIngest(listener, nodes, config.discoveryRules, app.log);
+  const enricher = new NodeEnricher({
+    listener,
+    nodes,
+    logger: app.log,
+    enabled: config.discovery.probe_new_nodes,
+  });
+
+  attachIngest(listener, nodes, config.discoveryRules, app.log, (nodeNum) =>
+    enricher.enqueue(nodeNum),
+  );
 
   const admin = new AdminClient({
     listener,
@@ -109,8 +122,17 @@ async function main(): Promise<void> {
 
   await app.register(cookie, { secret: config.sessionSecret });
 
-  const auth = { store: new SessionStore(config.server.session_ttl), config };
+  const auth = {
+    store: new SessionStore(config.server.session_ttl),
+    config,
+    users,
+  };
   registerAuthRoutes(app, auth);
+
+  app.log.info(
+    { accounts: users.list().length },
+    "auth ready; the built-in 'admin' account comes from config.yaml",
+  );
 
   // Every fleet route behind one hook, so a new route cannot be added
   // unauthenticated by forgetting a decorator.
@@ -124,7 +146,10 @@ async function main(): Promise<void> {
       admin,
       prober,
       tasks,
+      auth,
+      enricher,
     });
+    registerAdminRoutes(scope, { auth, users, db });
   });
 
   await registerWebUi(app);
@@ -146,6 +171,7 @@ async function main(): Promise<void> {
     app.log.info({ signal }, "shutting down");
     clearInterval(pruneTimer);
     prober.stop();
+    enricher.stop();
     await listener.stop();
     await app.close();
     db.close();

@@ -3,11 +3,14 @@ import type {
   DiscoverySummary,
   RadioStatus,
   RadioTask,
+  SessionUser,
 } from "../shared/types";
+import { canAdminister, canOperateRadio } from "../shared/roles";
 import { api, ApiError } from "./api";
 import { useRoute } from "./router";
 import { Backdrop } from "./components/Backdrop";
 import { Layout } from "./components/Layout";
+import { Admin } from "./pages/Admin";
 import { Fleet } from "./pages/Fleet";
 import { Login } from "./pages/Login";
 import { NodeDetail } from "./pages/NodeDetail";
@@ -26,6 +29,7 @@ type Auth = "checking" | "in" | "out";
 
 export function App() {
   const [auth, setAuth] = useState<Auth>("checking");
+  const [user, setUser] = useState<SessionUser | null>(null);
   const [radio, setRadio] = useState<RadioStatus | null>(null);
   const [tasks, setTasks] = useState<RadioTask[]>([]);
   const [discovery, setDiscovery] = useState<DiscoverySummary | null>(null);
@@ -34,7 +38,10 @@ export function App() {
   useEffect(() => {
     void api
       .getSession()
-      .then((session) => setAuth(session.authenticated ? "in" : "out"))
+      .then((session) => {
+        setUser(session.user);
+        setAuth(session.authenticated ? "in" : "out");
+      })
       .catch(() => setAuth("out"));
   }, []);
 
@@ -92,6 +99,7 @@ export function App() {
       await api.logout();
     } finally {
       setAuth("out");
+      setUser(null);
       setRadio(null);
       setTasks([]);
     }
@@ -106,11 +114,21 @@ export function App() {
     );
   }
 
-  if (auth === "out") {
+  // `auth === "in"` without a user would mean the session endpoint answered
+  // affirmatively but told us nothing about who we are; treat it as signed
+  // out rather than rendering a shell with no identity.
+  if (auth === "out" || user === null) {
     return (
       <>
         <Backdrop />
-        <Login onSuccess={() => setAuth("in")} />
+        <Login
+          onSuccess={() =>
+            void api.getSession().then((session) => {
+              setUser(session.user);
+              setAuth("in");
+            })
+          }
+        />
       </>
     );
   }
@@ -121,22 +139,63 @@ export function App() {
       <Layout
         radio={radio}
         tasks={tasks}
+        user={user}
         onCancelTask={(task) => void cancelTask(task)}
+        onNavigate={navigate}
         onLogout={() => void logout()}
       >
-        {route.name === "node" ? (
+        {route.name === "admin" ? (
+          // A deep link to /admin is reachable by anyone signed in, so the
+          // route refuses rather than rendering a shell whose every request
+          // 403s. The server is still the actual guard.
+          canAdminister(user.role) ? (
+            <Admin currentUser={user} onBack={() => navigate("/")} />
+          ) : (
+            <NotPermitted role={user.role} onBack={() => navigate("/")} />
+          )
+        ) : route.name === "node" ? (
           <NodeDetail
             nodeId={route.nodeId}
             onBack={() => navigate("/")}
             // Null until the first status poll lands. Treating "unknown" as
             // "no radio" keeps the mesh-write controls disabled until we
             // actually know, rather than offering a button that 503s.
-            radioConnected={radio?.connected ?? false}
+            // Both must hold: the radio has to be there, and the role has
+            // to be allowed to use it. A viewer sees the same page without
+            // the controls.
+            radioConnected={
+              (radio?.connected ?? false) && canOperateRadio(user.role)
+            }
           />
         ) : (
           <Fleet onOpen={navigate} discovery={discovery} />
         )}
       </Layout>
     </>
+  );
+}
+
+function NotPermitted({
+  role,
+  onBack,
+}: {
+  role: SessionUser["role"];
+  onBack: () => void;
+}) {
+  return (
+    <div className="card p-8 text-center">
+      <h2 className="text-lg font-semibold text-white">Not available</h2>
+      <p className="mx-auto mt-2 max-w-md text-sm text-neutral-500">
+        Administration requires the admin role. You are signed in as{" "}
+        <span className="text-amber-500/80">{role}</span>.
+      </p>
+      <button
+        type="button"
+        onClick={onBack}
+        className="mt-4 rounded-lg border border-neutral-800 px-3 py-1.5 text-sm text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400"
+      >
+        Back to the fleet
+      </button>
+    </div>
   );
 }

@@ -123,6 +123,7 @@ src/server/
     listener.ts              serial connect, reconnect/backoff, event fan-out
     ingest.ts                packet -> repository writes, behind the discovery gate
     discovery.ts             pure admission rules
+    enrich.ts                asks new nodes to introduce themselves
     admin.ts                 AdminMessage build/send/correlate, session passkey
     capability.ts            periodic admin probe sweep
     tasks.ts                 registry of user-initiated operations + cancellation
@@ -394,12 +395,42 @@ Notes that are easy to get wrong:
 
 ---
 
-## 8. Auth
+## 8. Auth and roles
 
-Single shared password, sessions held **in memory**, keyed by a 32-byte random id in a
-signed `HttpOnly` / `SameSite=strict` cookie. A restart logs everyone out; for a
-single-operator tool that is the right trade — no session table to migrate, no expiry
-sweep to get wrong, no stolen cookie outliving the process.
+Named accounts, sessions held **in memory**, keyed by a 32-byte random id in a signed
+`HttpOnly` / `SameSite=strict` cookie. A restart signs everyone out; for a small
+deployment that is the right trade — no session table to migrate, no expiry sweep to get
+wrong, no stolen cookie outliving the process.
+
+**The `admin` account comes from `config.yaml`, not the database.** That is what keeps the
+console reachable when the database is empty, restored from a backup, or has had its last
+admin deleted. It has no row, cannot be demoted or deleted from inside the app, and the
+name is reserved so a database user can never shadow it. `users.username` carries a
+`COLLATE NOCASE` unique index, because login compares case-insensitively and otherwise
+"Jordan" and "jordan" would be two accounts answering the same credentials.
+
+**Three roles**, defined once in `shared/roles.ts` so the server's enforcement and the
+UI's affordances cannot drift: `viewer` reads, `manager` also operates the radio (probe,
+remote config, cancelling a task), `admin` also manages accounts and clears collected data.
+The capability helpers (`canOperateRadio`, `canAdminister`) are shared rather than
+re-derived from string comparisons on each side.
+
+**The server is the only guard.** The UI hides what a role cannot do, but that is an
+affordance — every protected route calls `requireCapability` itself. Verified by hitting
+each endpoint as each role. A deep link to `/admin` is refused client-side too, not for
+security but because rendering a page whose every request 403s is a poor way to say no.
+
+**Role changes and password resets revoke that account's sessions immediately**
+(`SessionStore.revokeUser`). Leaving the old session alive would let a demoted account keep
+its former permissions until the cookie happened to expire, which defeats the point of
+being able to revoke it. An admin cannot delete the account they are signed in as.
+
+**The purge endpoints require the scope echoed back as a typed confirmation**, checked
+server-side as well as in the UI, so a mis-wired button cannot delete a fleet on its own.
+They clear mesh data only — accounts and schema are untouched.
+
+A failed login does not say which half was wrong, and an unknown username still runs a
+hash so the response time does not enumerate valid accounts.
 
 Every fleet route sits behind one `onRequest` hook registered on an encapsulated Fastify
 scope, so a new route cannot be added unauthenticated by forgetting a decorator. Keep it
@@ -505,6 +536,11 @@ bloom over near-black.
 - **Node identity:** `nodeNum` (uint32) is the primary key everywhere on the server; `!hex`
   is display only. Convert at the boundary via `mesh/nodeId.ts`. The API accepts
   `!a4c138f0`, bare `a4c138f0`, or decimal.
+  **Log lines carry both forms**, via `logNode(nodeNum)` spread into the log object. Half
+  the world speaks `!hex` — firmware, the Meshtastic apps, our own UI — while protobuf
+  fields and stack traces carry the decimal, so a log printing only one of them cannot be
+  grepped against the other. Use the helper rather than picking whichever form the call
+  site happens to hold.
 - **Timestamps:** UTC epoch seconds on the wire and in the database; formatted in the
   browser's local zone. Nodes with no time source send `0`, so `ingest.ts` treats
   implausible values as "now" rather than filing a row in 1970.
@@ -561,11 +597,58 @@ bloom over near-black.
   has ever heard; letting that through would admit the whole mesh on first run, which is
   exactly when a restrictive policy matters. `onNodeInfoPacket` therefore goes through the
   same gate and a policy requiring a message rejects the lot.
+  **`NodeInfo.channel` is not evidence of the primary channel.** The protobuf documents it
+  as *"only populated if it is not the default channel"*, so a zero means primary **or
+  unknown**. Reporting it as primary made a `channel: primary` policy admit the radio's
+  entire node database — nodes heard long ago, on other channels, or over MQTT. The ingest
+  now passes `undefined` for a zero there, which the existing "missing evidence does not
+  match" rule rejects.
+  **Only a packet the radio decoded is evidence of a channel**, because holding the key is
+  the thing being tested. `MeshPacket.channel` is *not* an index in two documented cases,
+  and `ingest.ts:channelEvidence` returns `undefined` for both. While the payload is still
+  `encrypted` the field "instead contains the **channel hash**" — a different number space,
+  which reads as 0 and therefore as "primary" for foreign traffic the radio forwards but
+  cannot open. And a **PKI-encrypted** packet used no channel at all: it is addressed to our
+  public key, so any node holding it reaches us whatever channels it has. This was the
+  second discovery leak, and the larger one — `onMeshPacket` fires for *every* packet,
+  before the library looks at `payloadVariant` (`case "encrypted": log; break`), so the
+  widest gate in the file was reading a hash as an index.
+  **The `meshPacket` handler writes a row whenever it admits**, even with no usable hop
+  count. It used to `return` on `hopStart === 0`, so a node admitted only there was logged
+  as discovered and then never written: invisible in the UI, nothing for the enricher to
+  find, and `nodes.exists` still false so the next packet announced the same discovery
+  again.
+  **MQTT-witnessed nodes are excluded** unless `discovery.include_mqtt` is set. A node the
+  radio only saw over MQTT never transmitted on the air, so it cannot have used the local
+  channel whatever index its record carries. `PacketMetadata` carries neither `viaMqtt` nor
+  `pkiEncrypted`, so the ingest stashes both from `onMeshPacket` — which the library
+  dispatches *before* decoding into typed events, on the same synchronous call stack,
+  verified against `handleMeshPacket` — and the typed handlers read them back. One slot,
+  not a map: nothing in these handlers awaits, so the stash is always the current packet's,
+  and a `from` check covers a typed event arriving by any other route. Without that the
+  typed handlers were a back door for exactly the nodes being
+  excluded.
   **The local node is never a discovery candidate** — it is the instrument, not a finding.
   Missing evidence counts as *not* matching: a packet carrying no channel fails a channel
   rule rather than passing it, since admitting on absent information silently widens the
   policy. `/api/status` carries a `discovery` summary so an empty fleet can distinguish a
   quiet mesh from a filter excluding everything.
+- **A newly admitted node is asked to introduce itself** (`mesh/enrich.ts`). Discovery can
+  admit on evidence carrying nothing but a node number — a text message says who sent it
+  and no more — and the names, hardware and battery would otherwise arrive with that node's
+  next broadcast, hours later. The requests copy the library's own `requestPosition`: an
+  empty payload on `NODEINFO_APP` / `TELEMETRY_APP` with `wantResponse`, which firmware
+  answers with its own record. **Nothing correlates the reply** — it arrives as an ordinary
+  NodeInfo or Telemetry packet and the normal ingest records it, which is why that module
+  has no response handling at all.
+  The automatic pass asks only for what is missing, re-checked at send time rather than at
+  discovery, and never for the local node. The manual **Refresh from node** button asks for
+  everything including position regardless of what is stored, because the point of pressing
+  it is to learn what is true now; it waits for the replies so it can report what actually
+  came back, and registers a task so the wait is visible and cancellable.
+  **`enqueue` defers its drain by a tick on purpose.** The ingest admits a node *before* it
+  writes the row, so draining inline looked the node up, found nothing and dropped it
+  silently — a bug a unit test missed because it had seeded the row first.
 - **Every user-initiated mesh operation registers a task** (`mesh/tasks.ts`) so the UI can
   say what the radio is busy with, from any page, and offer a way out. A mesh round trip
   runs to tens of seconds and the operator has usually navigated elsewhere by then, so a

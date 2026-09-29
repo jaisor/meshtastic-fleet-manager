@@ -36,6 +36,19 @@ server:
   secure_cookies: false
 
 auth:
+  # The built-in "admin" account. It lives here rather than in the database
+  # so the console stays reachable when the database is empty, restored from
+  # a backup, or has had its last admin account deleted. It cannot be renamed,
+  # demoted or removed from inside the app, and no database user may take the
+  # name "admin".
+  #
+  # Every other account is created from the Administration page, and gets one
+  # of three roles:
+  #
+  #   admin    everything, including user accounts and clearing the node database
+  #   manager  read everything, and use the radio (probe, remote configuration)
+  #   viewer   read-only; never transmits
+  #
   # Exactly one of password / password_hash.
   #
   # Plaintext is hashed at load time and never written to the database or
@@ -96,6 +109,13 @@ database:
 discovery:
   # "any", "primary" (channel 0), or a channel index 0-7 as configured on
   # the radio. The node must be heard on this channel to be admitted.
+  #
+  # Only a decoded packet proves the channel, because decoding it required
+  # that channel's key. Entries from the radio's own node database do NOT:
+  # their channel field is "only populated if it is not the default
+  # channel", so a zero there means primary *or* unknown and is treated as
+  # unknown. With a channel set, a node is admitted once it actually
+  # transmits something the radio decodes on that channel.
   channel: any
 
   # Require an actual text message. Telemetry, position and node-info
@@ -111,6 +131,28 @@ discovery:
   #
   #   message_contains: "join fleet"
   message_contains: null
+
+  # Ask a newly discovered node for its names, hardware, role and metrics
+  # rather than waiting hours for its next broadcast.
+  #
+  # Discovery can admit a node on evidence carrying nothing but its number
+  # -- a text message says who sent it and no more -- which would otherwise
+  # leave a row showing only a node ID for the rest of the day.
+  #
+  # Costs up to two transmissions per newly discovered node, and only for
+  # what is actually missing, so turn it off on a busy mesh where airtime
+  # matters more than filling rows in promptly. The Refresh button on a
+  # node's page is unaffected either way.
+  probe_new_nodes: true
+
+  # Admit nodes the radio only ever witnessed over MQTT rather than hearing
+  # on the air.
+  #
+  # Off by default: an MQTT-sourced node never transmitted on your channel,
+  # so it cannot satisfy "what the radio hears" -- yet the radio still lists
+  # it in the node database it hands over, which is the usual reason
+  # strangers appear in a fleet that should be private.
+  include_mqtt: false
 
 fleet:
   # A node heard within this window is "online".

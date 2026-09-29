@@ -7,7 +7,9 @@ import type { CapabilityProber } from "../mesh/capability.js";
 import type { MeshListener } from "../mesh/listener.js";
 import { TaskCancelledError, type RadioTaskRegistry } from "../mesh/tasks.js";
 import { describeRules, isRestricted } from "../mesh/discovery.js";
-import { parseNodeId } from "../mesh/nodeId.js";
+import { requireCapability, type AuthContext } from "../auth.js";
+import type { NodeEnricher } from "../mesh/enrich.js";
+import { logNode, parseNodeId } from "../mesh/nodeId.js";
 import type { NodeConfigUpdate } from "../../shared/types.js";
 
 /**
@@ -29,12 +31,18 @@ export interface ApiDependencies {
   admin: AdminClient;
   prober: CapabilityProber;
   tasks: RadioTaskRegistry;
+  auth: AuthContext;
+  enricher: NodeEnricher;
 }
 
 export function registerApiRoutes(
   app: FastifyInstance,
   deps: ApiDependencies,
 ): void {
+  // Anything that puts the radio to work needs manager or admin. Reads are
+  // open to every signed-in role, including viewer.
+  const requireOperator = requireCapability(deps.auth, "operate");
+
   app.get("/api/status", async () => ({
     radio: deps.listener.getStatus(),
     staleAfter: deps.config.fleet.stale_after,
@@ -58,6 +66,8 @@ export function registerApiRoutes(
   app.post<{ Params: { id: string } }>(
     "/api/tasks/:id/cancel",
     async (request, reply) => {
+      if (!(await requireOperator(request, reply))) return reply;
+
       const id = Number(request.params.id);
       if (!Number.isInteger(id)) {
         return reply.status(400).send({ error: "malformed task id" });
@@ -101,6 +111,8 @@ export function registerApiRoutes(
   app.post<{ Params: { id: string } }>(
     "/api/nodes/:id/probe",
     async (request, reply) => {
+      if (!(await requireOperator(request, reply))) return reply;
+
       const nodeNum = parseNodeId(request.params.id);
       if (nodeNum === null) {
         return reply.status(400).send({ error: "malformed node id" });
@@ -138,9 +150,65 @@ export function registerApiRoutes(
     },
   );
 
+  /**
+   * Asks the node for everything it will report right now -- identity,
+   * device metrics and any sensor readings, and position.
+   *
+   * Unlike the automatic pass after discovery this asks regardless of what
+   * is already stored, because the point of pressing refresh is to learn
+   * what is true now. It waits for the replies so the button can say what
+   * actually arrived, and registers a task so the wait is visible and
+   * cancellable from anywhere.
+   */
+  app.post<{ Params: { id: string } }>(
+    "/api/nodes/:id/refresh",
+    async (request, reply) => {
+      if (!(await requireOperator(request, reply))) return reply;
+
+      const nodeNum = parseNodeId(request.params.id);
+      if (nodeNum === null) {
+        return reply.status(400).send({ error: "malformed node id" });
+      }
+      const node = deps.nodes.get(nodeNum);
+      if (!node) return reply.status(404).send({ error: "unknown node" });
+      if (node.isLocal) {
+        return reply
+          .status(400)
+          .send({ error: "the local node reports its own state over USB" });
+      }
+      if (!deps.listener.getDevice()) {
+        return reply.status(503).send({ error: "local radio is not connected" });
+      }
+
+      const { task, signal } = deps.tasks.start({
+        kind: "refresh",
+        label: "Refreshing device information",
+        nodeNum,
+        nodeName: node.longName ?? node.shortName ?? null,
+        timeoutSeconds: 25,
+      });
+
+      try {
+        const received = await deps.enricher.refresh(nodeNum, signal);
+        // The node row is updated by the ingest as replies land, so read it
+        // back rather than reporting what we hoped for.
+        return { received, node: deps.nodes.get(nodeNum) };
+      } catch (cause) {
+        if (cause instanceof TaskCancelledError) {
+          return reply.status(409).send({ error: "refresh cancelled" });
+        }
+        throw cause;
+      } finally {
+        deps.tasks.finish(task.id);
+      }
+    },
+  );
+
   app.patch<{ Params: { id: string }; Body: NodeConfigUpdate }>(
     "/api/nodes/:id/config",
     async (request, reply) => {
+      if (!(await requireOperator(request, reply))) return reply;
+
       const nodeNum = parseNodeId(request.params.id);
       if (nodeNum === null) {
         return reply.status(400).send({ error: "malformed node id" });
@@ -218,7 +286,10 @@ export function registerApiRoutes(
           deps.nodes.setAdminCapability(nodeNum, cause.capability);
         }
 
-        request.log.warn({ nodeNum, err: message }, "remote config failed");
+        request.log.warn(
+          { ...logNode(nodeNum), err: message },
+          "remote config failed",
+        );
         return reply
           .status(502)
           .send({ error: message, operationId, state: "failed" as const });

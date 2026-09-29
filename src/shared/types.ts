@@ -4,6 +4,38 @@
  * browser. Nothing here may import from `server/` or `web/`.
  */
 
+import type { UserRole } from "./roles.js";
+
+/** Who is signed in, as every authenticated response reports it. */
+export interface SessionUser {
+  username: string;
+  role: UserRole;
+  /** True for the config-defined `admin`, which has no database row. */
+  builtIn: boolean;
+}
+
+export interface SessionResponse {
+  authenticated: boolean;
+  user: SessionUser | null;
+}
+
+/** A database-backed account, as the admin page lists it. */
+export interface ManagedUser {
+  id: number;
+  username: string;
+  role: UserRole;
+  createdAt: number;
+  lastLoginAt: number | null;
+}
+
+/** Row counts returned after a destructive maintenance action. */
+export interface MaintenanceResult {
+  nodes: number;
+  telemetry: number;
+  positions: number;
+  operations: number;
+}
+
 /**
  * Whether the local node is allowed to administer a given remote node.
  *
@@ -128,7 +160,7 @@ export interface RadioStatus {
  * `RadioTaskKind` as new operations are added -- traceroute is the obvious
  * next one.
  */
-export type RadioTaskKind = "probe" | "config";
+export type RadioTaskKind = "probe" | "config" | "refresh";
 
 /**
  * What the discovery policy currently admits. Surfaced so an empty fleet

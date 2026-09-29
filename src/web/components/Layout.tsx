@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
-import { RadioTower, LogOut, TriangleAlert } from "lucide-react";
-import type { RadioStatus, RadioTask } from "../../shared/types";
+import { RadioTower, TriangleAlert } from "lucide-react";
+import type { RadioStatus, RadioTask, SessionUser } from "../../shared/types";
+import { UserMenu } from "./UserMenu";
 import { RadioTaskBanner } from "./RadioTaskBanner";
 import { absoluteTime, relativeTime } from "./format";
 
@@ -20,13 +21,17 @@ import { absoluteTime, relativeTime } from "./format";
 export function Layout({
   radio,
   tasks,
+  user,
   onCancelTask,
+  onNavigate,
   onLogout,
   children,
 }: {
   radio: RadioStatus | null;
   tasks: RadioTask[];
+  user: SessionUser;
   onCancelTask: (task: RadioTask) => void;
+  onNavigate: (path: string) => void;
   onLogout: () => void;
   children: ReactNode;
 }) {
@@ -42,15 +47,7 @@ export function Layout({
 
         <div className="flex items-center gap-4">
           {radio && <RadioPill radio={radio} />}
-          <button
-            type="button"
-            onClick={onLogout}
-            className="inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-3 py-1.5 text-sm text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400"
-          >
-            <LogOut aria-hidden className="h-4 w-4" />
-            <span className="hidden sm:inline">Sign out</span>
-            <span className="sr-only sm:hidden">Sign out</span>
-          </button>
+          <UserMenu user={user} onNavigate={onNavigate} onLogout={onLogout} />
         </div>
       </header>
 

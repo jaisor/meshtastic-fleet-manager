@@ -19,10 +19,24 @@ import type { DiscoveryRules } from "../config.js";
 
 /** What a single packet tells us about the node that sent it. */
 export interface DiscoveryEvidence {
-  /** Channel index the packet arrived on, when the packet carries one. */
+  /**
+   * Channel index, when it is actually known.
+   *
+   * Left undefined rather than defaulted to 0, because a zero in the
+   * protobuf means "primary" and "no idea" alike, and the difference is the
+   * whole policy. Only a packet the radio **decoded with one of our channel
+   * keys** is evidence of that channel, since holding the key is the thing
+   * being tested. Three sources look like evidence and are not:
+   * a NodeInfo's `channel` ("only populated if it is not the default
+   * channel"), an encrypted packet's (that field carries a channel *hash*
+   * while the payload is encrypted), and a PKI-encrypted packet's (it used
+   * no channel at all). `ingest.ts` passes undefined for each.
+   */
   channel?: number;
   /** Text content, for a message packet only. */
   message?: string;
+  /** The radio saw this over MQTT rather than hearing it on the air. */
+  viaMqtt?: boolean;
 }
 
 export function describeRules(rules: DiscoveryRules): string {
@@ -37,12 +51,13 @@ export function describeRules(rules: DiscoveryRules): string {
   } else if (rules.requireMessage) {
     parts.push("a text message");
   }
+  if (!rules.includeMqtt) parts.push("heard on the air, not via MQTT");
   return parts.join(", ");
 }
 
 /** True when the rules admit nothing by default -- i.e. they are narrowed. */
 export function isRestricted(rules: DiscoveryRules): boolean {
-  return rules.channel !== null || rules.requireMessage;
+  return rules.channel !== null || rules.requireMessage || !rules.includeMqtt;
 }
 
 /**
@@ -57,6 +72,13 @@ export function admits(
   rules: DiscoveryRules,
   evidence: DiscoveryEvidence,
 ): boolean {
+  // A node witnessed over MQTT was never heard on the air, so it cannot
+  // have transmitted on the local radio's channel -- whatever channel
+  // index the record happens to carry.
+  if (!rules.includeMqtt && evidence.viaMqtt === true) {
+    return false;
+  }
+
   if (rules.channel !== null && evidence.channel !== rules.channel) {
     return false;
   }

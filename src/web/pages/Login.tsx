@@ -3,6 +3,7 @@ import { RadioTower } from "lucide-react";
 import { api, ApiError } from "../api";
 
 export function Login({ onSuccess }: { onSuccess: () => void }) {
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -12,7 +13,7 @@ export function Login({ onSuccess }: { onSuccess: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      await api.login(password);
+      await api.login(username, password);
       setPassword("");
       onSuccess();
     } catch (cause) {
@@ -34,9 +35,23 @@ export function Login({ onSuccess }: { onSuccess: () => void }) {
             Fleet Manager
           </h1>
           <p className="text-sm text-neutral-500">
-            Enter the console password to continue.
+            Sign in to continue.
           </p>
         </div>
+
+        <label htmlFor="username" className="sr-only">
+          Username
+        </label>
+        <input
+          id="username"
+          type="text"
+          autoComplete="username"
+          autoFocus
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          className="mb-3 w-full rounded-lg border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-neutral-100 placeholder-neutral-600 [corner-shape:bevel] focus:border-amber-500/50"
+          placeholder="Username"
+        />
 
         <label htmlFor="password" className="sr-only">
           Password
@@ -45,7 +60,6 @@ export function Login({ onSuccess }: { onSuccess: () => void }) {
           id="password"
           type="password"
           autoComplete="current-password"
-          autoFocus
           value={password}
           onChange={(event) => setPassword(event.target.value)}
           className="w-full rounded-lg border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-neutral-100 placeholder-neutral-600 [corner-shape:bevel] focus:border-amber-500/50"
@@ -60,7 +74,7 @@ export function Login({ onSuccess }: { onSuccess: () => void }) {
 
         <button
           type="submit"
-          disabled={busy || password.length === 0}
+          disabled={busy || username.length === 0 || password.length === 0}
           className="mt-5 w-full rounded-lg border border-amber-500/40 bg-amber-500/15 px-4 py-2 font-medium text-amber-300 transition [corner-shape:bevel] hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {busy ? "Signing in…" : "Sign in"}

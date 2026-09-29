@@ -11,11 +11,13 @@ import { useCallback, useEffect, useState } from "react";
 
 export type Route =
   | { name: "fleet" }
-  | { name: "node"; nodeId: string };
+  | { name: "node"; nodeId: string }
+  | { name: "admin" };
 
 function parse(pathname: string): Route {
   const match = /^\/nodes\/([^/]+)\/?$/.exec(pathname);
   if (match?.[1]) return { name: "node", nodeId: decodeURIComponent(match[1]) };
+  if (/^\/admin\/?$/.test(pathname)) return { name: "admin" };
   return { name: "fleet" };
 }
 
