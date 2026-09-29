@@ -53,6 +53,22 @@ Three things in `docker/compose.yaml` may need editing for your host:
 3. **The published port**, if 18432 is taken. Only the left half of `18432:8432`
    is yours to pick; the right half must match `server.port` in the config.
 
+### Where the database lives
+
+By default it is a Docker named volume, `meshtastic-fleet-manager_fleet-data`, holding
+`/data/fleet.db` plus the `-wal` and `-shm` files WAL mode needs. On Docker Desktop that
+volume sits inside the Linux VM and is not browsable from the host, so reach it through a
+container:
+
+```sh
+docker run --rm -v meshtastic-fleet-manager_fleet-data:/data busybox ls -la /data
+```
+
+To keep it in an ordinary host folder instead — easier to back up or open in a SQLite
+browser — swap the volume line in `docker/compose.yaml` for a bind mount such as
+`- /srv/meshtastic/data:/data`. Mount the **directory**, never the `.db` file itself.
+`docker/compose.yaml` has the full comment, including the uid the container runs as.
+
 ## Running without Docker
 
 ```sh

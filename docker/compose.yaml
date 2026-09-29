@@ -1,3 +1,14 @@
+# Without this, Compose names the project after the directory holding this
+# file -- literally `docker` -- and the database volume becomes
+# `docker_fleet-data`, which collides with any other project of yours laid
+# out the same way. Pinning the name makes it `meshtastic-fleet-manager_fleet-data`.
+#
+# Changing this later points Compose at a *different* volume: the old data
+# is not lost, but it is orphaned under the previous name. To carry it over:
+#   docker run --rm -v docker_fleet-data:/from \
+#     -v meshtastic-fleet-manager_fleet-data:/to busybox cp -a /from/. /to/
+name: meshtastic-fleet-manager
+
 services:
   fleet-manager:
     build:
@@ -15,9 +26,35 @@ services:
     volumes:
       # The config is read once at startup; a change needs a restart.
       - ../config/config.yaml:/config/config.yaml:ro
-      # A named volume, not a bind mount of a single file: WAL mode writes
-      # `fleet.db-wal` and `fleet.db-shm` next to the database, so the
-      # directory has to be writable.
+      # The fleet database, at /data/fleet.db inside the container (set by
+      # database.path in config.yaml).
+      #
+      # A named volume by default. It lives wherever the Docker engine keeps
+      # volumes -- `docker volume inspect meshtastic-fleet-manager_fleet-data`
+      # reports the path, but on Docker Desktop that path is inside the Linux
+      # VM and is NOT browsable from the host. Reach it through a container:
+      #
+      #   docker run --rm -v meshtastic-fleet-manager_fleet-data:/data \
+      #     busybox ls -la /data
+      #
+      # To keep the database in an ordinary host folder instead -- easier to
+      # back up, inspect with a SQLite browser, or move between machines --
+      # replace the line below with a bind mount:
+      #
+      #   - /srv/meshtastic/data:/data        # Linux / macOS / Raspberry Pi
+      #   - ./data:/data                      # relative to THIS file (docker/)
+      #   - C:\Users\you\meshtastic:/data     # Windows, Docker Desktop
+      #
+      # Mount the DIRECTORY, never `...:/data/fleet.db` directly: WAL mode
+      # creates `fleet.db-wal` and `fleet.db-shm` beside the database, so the
+      # directory itself has to be writable. A single-file bind mount fails
+      # with "attempt to write a readonly database".
+      #
+      # The container runs as uid 1000 (`node`), so a bind-mounted host
+      # directory must be writable by that uid -- `sudo chown 1000:1000 <dir>`
+      # on Linux. Docker Desktop on Windows and macOS handles this for you.
+      # If you switch after collecting data, copy it across first with the
+      # `docker run ... cp` recipe above.
       - fleet-data:/data
 
     devices:
