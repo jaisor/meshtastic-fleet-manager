@@ -21,6 +21,17 @@ export type AdminCapability =
 /** Derived from `lastHeardAt` against the configured `stale_after`. */
 export type NodeState = "online" | "stale" | "offline";
 
+/**
+ * Link quality, derived from the last SNR and RSSI measured on a packet
+ * that arrived **directly** from the node.
+ *
+ * `unknown` means no direct measurement, which is the normal state for a
+ * node only ever heard through a relay — not a sign of a bad link. Both
+ * figures describe the last hop, so recording them from a relayed packet
+ * would describe the relay's link rather than this node's.
+ */
+export type SignalQuality = "good" | "medium" | "bad" | "unknown";
+
 export interface FleetNode {
   /** Meshtastic node number. Primary key everywhere on the server. */
   nodeNum: number;
@@ -36,7 +47,13 @@ export interface FleetNode {
   firstSeenAt: number;
   state: NodeState;
   isLocal: boolean;
+  /** Last SNR in dB measured on a direct packet from this node. */
   snr: number | null;
+  /** Last RSSI in dBm measured on a direct packet from this node. */
+  rssi: number | null;
+  /** Derived from snr + rssi; see SignalQuality. */
+  signal: SignalQuality;
+  /** Relay count between the local radio and this node. 0 means direct. */
   hopsAway: number | null;
   batteryLevel: number | null;
   voltage: number | null;
@@ -89,6 +106,18 @@ export interface RadioStatus {
   localNodeNum: number | null;
   lastErrorText: string | null;
   lastConnectedAt: number | null;
+  /**
+   * Frames the radio sent that could not be decoded as protobuf, since this
+   * connection opened.
+   *
+   * Individually harmless -- the library drops the frame and carries on --
+   * but the rate is the useful signal. A handful right after connect is
+   * normal resynchronization. A steadily climbing count means real packets
+   * are being lost, and the usual cause is the node emitting debug log text
+   * over the same serial link (`security.debug_log_api_enabled`).
+   */
+  decodeErrors: number;
+  lastDecodeErrorAt: number | null;
 }
 
 /**

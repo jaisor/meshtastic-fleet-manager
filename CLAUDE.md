@@ -5,9 +5,10 @@ monitoring, and remote administration over the mesh.
 
 Status: **first pass built and running.** Discovery, persistence, auth, the fleet list,
 node detail, the admin-capability probe, and remote rename all work end to end against a
-seeded database, including degraded mode with no radio attached. Verified without
-hardware and without Docker -- see §12 for exactly what that leaves unproven. Update this
-line and §13 as work lands.
+seeded database, including degraded mode with no radio attached. The Docker image builds
+and runs. **First contact with real hardware has happened** — the container is running
+against an ESP32-S3 node — but the mesh paths are still only lightly exercised; §12 is the
+honest list. Update this line and §13 as work lands.
 
 ---
 
@@ -124,8 +125,9 @@ src/server/
   routes/api.ts              HTTP handlers; thin
 src/web/
   main.tsx  App.tsx  api.ts  router.ts  index.css  index.html
-  components/  Backdrop, Layout, StatusDot, CapabilityBadge, format.ts
+  components/  Backdrop, Layout, StatusDot, SignalDot, CapabilityBadge, format.ts
   pages/       Login, Fleet, NodeDetail
+  pages/fleetOrdering.ts   pure filter + comparator logic for the fleet list
 ```
 
 Keep the mesh layer free of HTTP concerns and the routes free of protobuf concerns. The
@@ -202,6 +204,51 @@ Meshtastic JS packages move fast and `transport-node-serial` is pre-1.0.
    `new TransportNodeSerial(port)`. Revert to the factory only once this is fixed upstream.
    `disconnect()` has the same `port.close()` shape but is safe, because the transport
    constructor leaves a permanent `error` listener attached.
+
+---
+
+### "Received undecodable packet" / "illegal tag: field no 0 wire type 2"
+
+Logged by `@meshtastic/core`, not by us. **Non-fatal**: `decodePacket` wraps `fromBinary`
+in try/catch, logs, and `break`s — the stream continues and exactly one frame is lost.
+
+The mechanism, confirmed by feeding a malformed frame through the library's own framer and
+reproducing the identical message:
+
+- `Utils.fromDeviceStream()` frames on the magic bytes `0x94 0xC3` followed by a 16-bit
+  big-endian length. Everything before the magic is emitted as `{type: "debug"}` — and
+  `decodePacket` then throws that away with a bare `case "debug": break;`. **The text that
+  caused the desync is discarded before anyone can see it**, which is why the log shows
+  only the fallout.
+- If the length is read at the wrong offset, or the magic bytes occur inside non-protobuf
+  data, a bogus slice reaches `fromBinary` and protobuf rejects it. Field number 0 is
+  invalid in protobuf, so "field no 0" is the signature of "these bytes were never a
+  protobuf message" rather than a version mismatch.
+
+Usual cause: the local node emitting debug log text over the same serial link. Firmware
+quiets its console once an API client attaches **unless**
+`Config.SecurityConfig.debug_log_api_enabled` is set — so that is the first thing to check.
+An ESP32-S3 on native USB is the worst case, since console and API share one CDC endpoint.
+
+`MeshListener.countDecodeErrors()` tallies these into `RadioStatus.decodeErrors` (reset per
+connection) because the *rate* is the signal and a single occurrence is meaningless. A few
+right after connect are normal resynchronization; a steadily climbing count means real
+packets are being dropped and nodes will look stale. The count rides along in `/api/status`
+and appears in the header pill's tooltip — deliberately not a visible warning, which would
+cry wolf on the normal case.
+
+It hooks the library's tslog instance via `device.log.attachTransport()` and matches on the
+message text, because there is no event for this and the offending bytes are gone. Brittle
+by nature: if the count silently reads zero on a link that is clearly noisy, check whether
+the library reworded the message.
+
+Two known weaknesses in that framer, worth knowing before blaming our code:
+
+- It scans the *payload* for `0x94 0xC3` and discards the frame if found
+  ("Malformed packet found, discarding"). A legitimate payload containing those two bytes
+  is thrown away — rare, but the length prefix should have been authoritative.
+- When the buffer holds no `0x94` at all, nothing is trimmed, so junk accumulates until a
+  magic byte arrives.
 
 ---
 
@@ -444,13 +491,38 @@ bloom over near-black.
   browser's local zone. Nodes with no time source send `0`, so `ingest.ts` treats
   implausible values as "now" rather than filing a row in 1970.
 - **`0` means unset** for many protobuf numeric fields; `zeroAsNull` handles it. Position
-  `0/0` is dropped rather than plotted — it is a real place in the Atlantic.
+  `0/0` is dropped rather than plotted — it is a real place in the Atlantic. The same
+  applies to `rxSnr`: an unset float and a genuine 0.0 dB reading are indistinguishable, so
+  0 is treated as absent and the occasional real 0 dB is lost.
+- **RSSI and SNR are recorded only from packets that arrived directly.** Both measure the
+  *last hop*. Attributing a relayed packet's figures to the originating node would report a
+  healthy link for a node the local radio cannot actually hear. `ingest.ts` computes hops
+  as `hopStart - hopLimit` and stores signal only when that is 0; older firmware leaves
+  `hopStart` at 0, in which case neither the hop count nor the signal is recorded.
+  Consequently `SignalQuality: "unknown"` is the *normal* state for a relayed node and must
+  never be rendered as a bad link — hence the badge reads "Unmeasured", mirroring the admin
+  badge's "Unprobed".
+- **Signal thresholds live in `deriveSignal` (`repositories/nodes.ts`)** next to
+  `deriveState`, so both derived fields are computed server-side and the UI just renders.
+  They are judgment calls, not a standard: SNR `>= -5` good, `>= -12` medium, below that
+  bad, against a demodulation floor near -17.5 dB for the default preset; RSSI `>= -115` /
+  `>= -126` against a sensitivity near -130 dBm. **When both are present the worse wins** —
+  a clean carrier that is vanishingly faint is not a good link.
 - **Upserts use `COALESCE(excluded.x, nodes.x)`** so a position packet cannot blank a name
   learned from an earlier NodeInfo, and `last_heard_at` only ever moves forward.
 - **Migrations** are forward-only and append-only. Never edit one that has shipped.
 - **Reads never touch the radio.** Every HTTP read serves from SQLite, so the console stays
   useful while the mesh is slow or the radio is unplugged. Only the config write path goes
   to the mesh.
+- **Fleet search and sort are client-side, on purpose.** The fleet stays under a few hundred
+  nodes and the list is already fetched in full, so `pages/fleetOrdering.ts` filters and
+  sorts in the browser rather than adding query surface and a round trip per keystroke.
+  Two rules in there are load-bearing and easy to regress:
+  **nulls sort last in both directions** — reversing is deliberately not a pure reversal,
+  because sorting by battery to find the flat ones is useless if it opens with a wall of
+  nodes that never reported one; and **every comparison tie-breaks on `nodeNum`**, because
+  the list refetches every 20s and equal rows would otherwise swap under the pointer.
+  Each sort key also carries its own default direction, applied when the key is selected.
 - **Mesh writes are never optimistic.** Every remote operation is a row in
   `admin_operations` with pending → confirmed | failed, surfaced in the UI. Pending rows
   are failed at startup, since they belong to a dead process with no waiter.

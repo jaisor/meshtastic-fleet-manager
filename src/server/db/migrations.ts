@@ -71,4 +71,14 @@ export const migrations: Migration[] = [
       CREATE INDEX idx_admin_ops_node ON admin_operations(node_num, created_at DESC);
     `,
   },
+  {
+    name: "002_node_rssi",
+    sql: `
+      -- Received signal strength in dBm, alongside the SNR already stored.
+      -- Both are recorded only from packets that arrived directly, since
+      -- they measure the last hop and would otherwise describe a relay's
+      -- link rather than this node's.
+      ALTER TABLE nodes ADD COLUMN rssi REAL;
+    `,
+  },
 ];

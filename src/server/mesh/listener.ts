@@ -49,6 +49,8 @@ export class MeshListener extends EventEmitter {
     localNodeNum: null,
     lastErrorText: null,
     lastConnectedAt: null,
+    decodeErrors: 0,
+    lastDecodeErrorAt: null,
   };
 
   constructor(private readonly options: ListenerOptions) {
@@ -114,10 +116,13 @@ export class MeshListener extends EventEmitter {
 
       const device = new MeshDevice(transport);
       this.device = device;
+      this.countDecodeErrors(device);
       this.wireEvents(device);
 
       this.status.connected = true;
       this.status.lastErrorText = null;
+      this.status.decodeErrors = 0;
+      this.status.lastDecodeErrorAt = null;
       this.status.lastConnectedAt = Math.floor(Date.now() / 1000);
       this.attempt = 0;
 
@@ -146,6 +151,34 @@ export class MeshListener extends EventEmitter {
       this.reconnectTimer = null;
       void this.connectLoop();
     }, delay * 1000);
+  }
+
+  /**
+   * Tallies frames the radio sent that could not be parsed as protobuf.
+   *
+   * `@meshtastic/core` logs these through its own tslog instance and then
+   * drops the frame; there is no event for it, and the non-protobuf bytes
+   * that caused the desync are discarded outright (`case "debug": break`).
+   * So the count is the only signal available, and without it there is no
+   * way to tell one-off resynchronization from steady packet loss.
+   *
+   * Matching on the message text is admittedly brittle. It is a diagnostic
+   * counter, so a miscount is cosmetic -- but if this ever silently reads
+   * zero on a noisy link, check whether the library reworded the message.
+   */
+  private countDecodeErrors(device: MeshDevice): void {
+    device.log.attachTransport((entry: Record<string, unknown>) => {
+      const meta = entry["_meta"] as { logLevelName?: string } | undefined;
+      if (meta?.logLevelName !== "ERROR") return;
+
+      const undecodable = Object.values(entry).some(
+        (value) => typeof value === "string" && value.includes("undecodable"),
+      );
+      if (!undecodable) return;
+
+      this.status.decodeErrors += 1;
+      this.status.lastDecodeErrorAt = Math.floor(Date.now() / 1000);
+    });
   }
 
   private wireEvents(device: MeshDevice): void {

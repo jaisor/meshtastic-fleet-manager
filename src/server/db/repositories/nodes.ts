@@ -4,6 +4,7 @@ import type {
   FleetNode,
   NodeState,
   PositionPoint,
+  SignalQuality,
   TelemetryPoint,
 } from "../../../shared/types.js";
 import { toNodeId } from "../../mesh/nodeId.js";
@@ -19,6 +20,7 @@ interface NodeRow {
   first_seen_at: number;
   last_heard_at: number | null;
   snr: number | null;
+  rssi: number | null;
   hops_away: number | null;
   battery_level: number | null;
   voltage: number | null;
@@ -38,6 +40,7 @@ export interface NodeUpsert {
   isLocal?: boolean;
   lastHeardAt?: number | null;
   snr?: number | null;
+  rssi?: number | null;
   hopsAway?: number | null;
   batteryLevel?: number | null;
   voltage?: number | null;
@@ -63,6 +66,33 @@ function deriveState(
   return "offline";
 }
 
+/**
+ * Classifies link quality from the last direct measurement.
+ *
+ * Thresholds are judgment calls, not a standard. LoRa demodulates below the
+ * noise floor -- Meshtastic's default preset bottoms out near -17.5 dB SNR --
+ * so a negative SNR is normal and only the margin above that floor matters:
+ *
+ *   SNR  >= -5 dB   comfortable margin
+ *        >= -12 dB  workable, degrading
+ *         < -12 dB  within a few dB of not decoding at all
+ *
+ * RSSI is the coarser check, against a typical LoRa sensitivity near
+ * -130 dBm. When both are present the *worse* of the two wins: a strong
+ * carrier buried in noise is not a good link, and neither is a clean but
+ * vanishingly faint one.
+ */
+function deriveSignal(snr: number | null, rssi: number | null): SignalQuality {
+  const ladder: SignalQuality[] = ["bad", "medium", "good"];
+  const ranks: number[] = [];
+
+  if (snr !== null) ranks.push(snr >= -5 ? 2 : snr >= -12 ? 1 : 0);
+  if (rssi !== null) ranks.push(rssi >= -115 ? 2 : rssi >= -126 ? 1 : 0);
+  if (ranks.length === 0) return "unknown";
+
+  return ladder[Math.min(...ranks)] ?? "unknown";
+}
+
 function toFleetNode(row: NodeRow, thresholds: StaleThresholds): FleetNode {
   return {
     nodeNum: row.node_num,
@@ -77,6 +107,8 @@ function toFleetNode(row: NodeRow, thresholds: StaleThresholds): FleetNode {
     state: deriveState(row.last_heard_at, thresholds),
     isLocal: row.is_local === 1,
     snr: row.snr,
+    rssi: row.rssi,
+    signal: deriveSignal(row.snr, row.rssi),
     hopsAway: row.hops_away,
     batteryLevel: row.battery_level,
     voltage: row.voltage,
@@ -102,12 +134,12 @@ export class NodeRepository {
         `
         INSERT INTO nodes (
           node_num, short_name, long_name, hw_model, role, firmware_version,
-          public_key, is_local, first_seen_at, last_heard_at, snr, hops_away,
-          battery_level, voltage
+          public_key, is_local, first_seen_at, last_heard_at, snr, rssi,
+          hops_away, battery_level, voltage
         ) VALUES (
           @nodeNum, @shortName, @longName, @hwModel, @role, @firmwareVersion,
-          @publicKey, @isLocal, @now, @lastHeardAt, @snr, @hopsAway,
-          @batteryLevel, @voltage
+          @publicKey, @isLocal, @now, @lastHeardAt, @snr, @rssi,
+          @hopsAway, @batteryLevel, @voltage
         )
         ON CONFLICT(node_num) DO UPDATE SET
           short_name       = COALESCE(excluded.short_name, nodes.short_name),
@@ -118,6 +150,7 @@ export class NodeRepository {
           public_key       = COALESCE(excluded.public_key, nodes.public_key),
           is_local         = MAX(excluded.is_local, nodes.is_local),
           snr              = COALESCE(excluded.snr, nodes.snr),
+          rssi             = COALESCE(excluded.rssi, nodes.rssi),
           hops_away        = COALESCE(excluded.hops_away, nodes.hops_away),
           battery_level    = COALESCE(excluded.battery_level, nodes.battery_level),
           voltage          = COALESCE(excluded.voltage, nodes.voltage),
@@ -140,6 +173,7 @@ export class NodeRepository {
         now: nowSeconds(),
         lastHeardAt: node.lastHeardAt ?? null,
         snr: node.snr ?? null,
+        rssi: node.rssi ?? null,
         hopsAway: node.hopsAway ?? null,
         batteryLevel: node.batteryLevel ?? null,
         voltage: node.voltage ?? null,

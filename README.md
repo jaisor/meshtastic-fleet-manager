@@ -13,6 +13,11 @@ web console for viewing their state and remotely reconfiguring them.
   local node, and distinguishes *refused* from *out of range*.
 - **Remote configuration.** Rename a remote node over the mesh, with the outcome confirmed
   rather than assumed.
+- **Link quality at a glance.** Each node carries a good / medium / bad signal label
+  derived from the last SNR and RSSI, plus how many relays away it is.
+- **Search and sort.** Filter the fleet as you type across node ID, short and long name, and
+  role; sort by short name, last heard, role, battery, remote-admin capability, signal
+  quality or hops away.
 
 ## Requirements
 
@@ -212,6 +217,43 @@ re-enables the mesh controls on its own.
 Set `serial.enabled: false` to run deliberately without a radio — useful for development,
 or for reading history off a database copy. The banner says so explicitly in that case
 rather than reporting a fault.
+
+## "Received undecodable packet" in the logs
+
+```
+ERROR [iMeshDevice] HandleFromRadio ⚠️  Received undecodable packet
+Error illegal tag: field no 0 wire type 2
+```
+
+This comes from the Meshtastic library, and on its own it is harmless: the frame is
+discarded and the connection carries on. It means some bytes arriving over the serial link
+were not a valid protobuf message — "field no 0" is protobuf's way of saying *this was
+never a message*, rather than pointing at a version mismatch.
+
+What matters is the **rate**, which the console tracks for you. Hover the radio pill in the
+header, or read it directly:
+
+```sh
+curl -s -b cookies.txt http://localhost:18432/api/status | jq .radio.decodeErrors
+```
+
+The counter resets on every reconnect.
+
+- **A few right after connecting** — normal. The reader attaches mid-stream and resyncs.
+- **Climbing steadily** — real packets are being lost, and nodes will drift to *stale*
+  sooner than they should.
+
+The usual cause is the local node writing debug log text over the same serial link the API
+uses. Firmware normally silences its console once an API client connects, unless that
+behavior has been overridden:
+
+```sh
+meshtastic --port /dev/ttyACM0 --set security.debug_log_api_enabled false
+```
+
+ESP32-S3 boards on native USB are the most affected, because the console and the API share
+a single USB CDC endpoint. If the count stays high with debug logging off, suspect the
+cable or a powered hub before the software.
 
 ## Remote administration
 

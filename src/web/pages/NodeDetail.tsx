@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { api, ApiError, type NodeDetailResponse } from "../api";
 import { CapabilityBadge } from "../components/CapabilityBadge";
+import { SignalDot } from "../components/SignalDot";
 import { StatusDot } from "../components/StatusDot";
 import {
   absoluteTime,
@@ -68,6 +69,7 @@ export function NodeDetail({
           </div>
           <div className="flex flex-col items-end gap-2">
             <StatusDot state={node.state} />
+            {!node.isLocal && <SignalDot signal={node.signal} />}
             {!node.isLocal && <CapabilityBadge capability={node.adminCapability} />}
           </div>
         </div>
@@ -84,11 +86,22 @@ export function NodeDetail({
           <Field label="Firmware" mono>
             {node.firmwareVersion ?? "—"}
           </Field>
-          <Field label="Hops away" mono>
-            {node.hopsAway ?? "—"}
+          <Field
+            label="Hops away"
+            mono
+            title="Relays between the local radio and this node"
+          >
+            {node.hopsAway === null
+              ? "—"
+              : node.hopsAway === 0
+                ? "0 (direct)"
+                : node.hopsAway}
           </Field>
-          <Field label="SNR" mono>
+          <Field label="SNR" mono title="Last direct packet">
             {metric(node.snr, " dB")}
+          </Field>
+          <Field label="RSSI" mono title="Last direct packet">
+            {metric(node.rssi, " dBm", 0)}
           </Field>
           <Field label="Battery" mono>
             {node.batteryLevel === null ? "—" : `${node.batteryLevel}%`}

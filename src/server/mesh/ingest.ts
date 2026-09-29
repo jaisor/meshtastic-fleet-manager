@@ -181,6 +181,36 @@ export function attachIngest(
     });
   });
 
+  /**
+   * Link quality, taken from the radio's own measurement of each packet.
+   *
+   * `rxSnr` and `rxRssi` describe the **last hop**, not the whole path. On a
+   * relayed packet they measure our link to the relay, so attributing them
+   * to the originating node would report a healthy link for a node we
+   * cannot actually hear. Only direct packets are recorded.
+   *
+   * Hops travelled is `hopStart - hopLimit`: the sender stamps `hopStart`
+   * with its configured limit and each relay decrements `hopLimit`. Older
+   * firmware leaves `hopStart` at 0, in which case the distance is unknown
+   * and we record neither the hop count nor the signal.
+   */
+  listener.on("meshPacket", (packet: Protobuf.Mesh.MeshPacket) => {
+    if (localNodeNum !== null && packet.from === localNodeNum) return;
+    if (packet.hopStart === 0) return;
+
+    const hopsAway = packet.hopStart - packet.hopLimit;
+    if (hopsAway < 0) return;
+
+    const direct = hopsAway === 0;
+    nodes.upsert({
+      nodeNum: packet.from,
+      hopsAway,
+      snr: direct ? zeroAsNull(packet.rxSnr) : undefined,
+      rssi: direct ? zeroAsNull(packet.rxRssi) : undefined,
+      lastHeardAt: resolveTime(packet.rxTime),
+    });
+  });
+
   listener.on(
     "metadata",
     (packet: Types.PacketMetadata<Protobuf.Mesh.DeviceMetadata>) => {

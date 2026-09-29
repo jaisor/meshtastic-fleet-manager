@@ -128,9 +128,17 @@ function DegradedBanner({ radio }: { radio: RadioStatus }) {
 
 function RadioPill({ radio }: { radio: RadioStatus }) {
   if (radio.connected) {
+    // Undecodable frames are surfaced only in the tooltip: a handful after
+    // connect is normal resynchronization, so promoting it to a visible
+    // warning would cry wolf. Someone chasing missing packets will look.
+    const decodeNote =
+      radio.decodeErrors > 0
+        ? ` · ${radio.decodeErrors} undecodable frame${radio.decodeErrors === 1 ? "" : "s"} since connect`
+        : "";
+
     return (
       <span
-        title={`${radio.portPath}${radio.configured ? "" : " (still configuring)"}`}
+        title={`${radio.portPath}${radio.configured ? "" : " (still configuring)"}${decodeNote}`}
         className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300 [corner-shape:bevel]"
       >
         <span aria-hidden className="h-2 w-2 rounded-full bg-emerald-500" />
