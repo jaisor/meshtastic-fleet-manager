@@ -9,8 +9,13 @@ import { TaskCancelledError, type RadioTaskRegistry } from "../mesh/tasks.js";
 import { describeRules, isRestricted } from "../mesh/discovery.js";
 import { requireCapability, type AuthContext } from "../auth.js";
 import type { NodeEnricher } from "../mesh/enrich.js";
+import type { RadioWatchdog } from "../mesh/watchdog.js";
 import { logNode, parseNodeId } from "../mesh/nodeId.js";
-import type { NodeConfigUpdate, RadioOccupancy } from "../../shared/types.js";
+import type {
+  NodeConfigUpdate,
+  RadioOccupancy,
+  RadioStatus,
+} from "../../shared/types.js";
 
 /**
  * Read paths serve straight from SQLite -- never from the radio -- so the
@@ -57,6 +62,8 @@ export interface ApiDependencies {
   tasks: RadioTaskRegistry;
   auth: AuthContext;
   enricher: NodeEnricher;
+  /** Null when `watchdog.enabled` or `serial.enabled` is off. */
+  watchdog: RadioWatchdog | null;
 }
 
 export function registerApiRoutes(
@@ -68,7 +75,10 @@ export function registerApiRoutes(
   const requireOperator = requireCapability(deps.auth, "operate");
 
   app.get("/api/status", async () => ({
-    radio: deps.listener.getStatus(),
+    radio: {
+      ...deps.listener.getStatus(),
+      watchdog: deps.watchdog?.getStatus() ?? null,
+    } satisfies RadioStatus,
     staleAfter: deps.config.fleet.stale_after,
     // Polled by the UI to drive the "radio busy" banner, so this endpoint
     // is also what makes a long operation visible from any page.

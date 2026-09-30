@@ -8,7 +8,9 @@ node detail, the admin-capability probe, and remote rename all work end to end a
 seeded database, including degraded mode with no radio attached. The Docker image builds
 and runs. **First contact with real hardware has happened** — the container is running
 against an ESP32-S3 node — but the mesh paths are still only lightly exercised; §12 is the
-honest list. Update this line and §13 as work lands.
+honest list. A radio that went deaf after ~15 minutes was traced to a missing serial
+heartbeat (§4, landmine 5) and is fixed, with a watchdog behind it (§6). Update this line
+and §13 as work lands.
 
 ---
 
@@ -127,6 +129,7 @@ src/server/
     radioConfig.ts           protobuf config <-> the stored settings snapshot
     admin.ts                 AdminMessage build/send/correlate, session passkey
     capability.ts            periodic admin probe sweep
+    watchdog.ts              local-radio self-check, restart on failure, air silence
     tasks.ts                 registry of user-initiated operations + cancellation
   routes/api.ts              HTTP handlers; thin
 src/web/
@@ -244,6 +247,22 @@ Meshtastic JS packages move fast and `transport-node-serial` is pre-1.0.
    inventing a setting. Do not "fix" this by decoding with the direct package on paths where
    the library does the decoding; there, the bundled copy wins and the field is genuinely
    gone.
+
+5. **The serial API session dies after 15 minutes of client silence, and nothing tells
+   you.** Firmware's `SerialConsole` treats no ToRadio bytes for 15 minutes
+   (`SERIAL_CONNECTION_TIMEOUT`) as a lost client and calls `PhoneAPI::close()`. The
+   port stays open, no error is raised, `onDeviceStatus` does not fire — but
+   `PhoneAPI::available()` is false from then on, so **no packet ever reaches us again**
+   while the UI still says "Radio connected". The library knows (`heartbeat()` is
+   documented as required on serial) but does not arm it: `setHeartbeatInterval` has to be
+   called, and is cleared only on a `DeviceDisconnected` status, so it would keep writing to
+   a transport we tore down ourselves. `listener.ts` runs its own 5-minute heartbeat per
+   connection instead. This was the cause of the radio "getting stuck after a while": the
+   server transmits only on probes and operator actions, so an idle one hit the cutoff
+   every time. Checked against firmware `develop` on 2026-09-30.
+   **A heartbeat reply does not prove the session is alive.** Firmware answers a heartbeat
+   with a `queueStatus` from `getFromRadio()` *before* the `available()` check, so it still
+   answers after `close()`. That is why the watchdog (§6) asks an admin question instead.
 
 ---
 
@@ -392,6 +411,33 @@ In the UI:
   a brief disabled flicker than a button that 503s.
 - With no radio the admin-capability advice block is replaced rather than shown: telling
   someone they "can still try" next to a disabled button would be a lie.
+
+**The radio watchdog** (`mesh/watchdog.ts`) covers the case the rest of this section
+cannot see: the port is open, and the radio has stopped working. Every `watchdog.interval`
+it sends the local node an admin `getDeviceMetadataRequest` addressed to *itself*, which the
+firmware handles on the node without transmitting — so it needs no radio lock and runs
+beside operator work. It validates the reply: it arrives within `watchdog.timeout`, comes
+from the node number given on connect, is a metadata response, and matches the firmware
+version and hardware model of the session's first check. That baseline is re-taken whenever
+the node re-sends its configuration, so a reboot into new firmware is not a fault. A failure
+re-checks every 15s; `failures_before_restart` in a row calls `listener.restart()`, which
+emits `disconnected` (so in-flight tasks are abandoned as on an unplug) and reconnects,
+sending a fresh `wantConfigId` — the thing that reopens a closed firmware session.
+A configuration dump still unfinished after 180s is also a failure.
+It sends via `sendRaw` with an id it chose, not `sendPacket`: the latter only returns the id
+once the send queue settles, and a packet to ourselves never gets an ACK (firmware sends the
+reply instead), so the waiter could not be registered in time. On an answer it calls
+`queue.processAck`, and on a timeout `queue.remove`, so the library does not log a spurious
+60s timeout per check. Latency reads ~220 ms, nearly all of it the queue's fixed 200 ms
+spacing.
+**The self-check cannot see the LoRa transceiver.** `RadioStatus.lastAirPacketAt` (any
+packet from another node, encrypted included, MQTT excluded) is the only evidence for that
+side, and the watchdog reports `silent` past `watchdog.silence_after`. It is **reported, not
+acted on**: a deaf receiver and a quiet mesh look identical from here. In the UI both
+`failing` and `silent` turn the header pill amber (“Radio not answering 1/3”, “Nothing
+heard since …”) with the detail in its tooltip, and neither gets a banner — a failing check
+resolves or becomes a restart within a minute, and a banner for a quiet mesh would cry wolf.
+With `serial.enabled` or `watchdog.enabled` off, `RadioStatus.watchdog` is null.
 
 Node state (`online` / `stale` / `offline`) stays derived from `lastHeardAt`, so with the
 radio down every node decays through those states on its own. That is correct — the
@@ -877,7 +923,29 @@ page reload. Server-side, `POST /probe` and `PATCH /config` were confirmed to re
 with no radio, so the UI's disabled state is not the only thing standing between a click
 and a bad request.
 
+**The watchdog is verified against a stub radio** (2026-09-30): a real `MeshDevice` over a
+stub transport playing the firmware. A healthy radio passes and the send queue is left
+empty; a radio that stops answering (a closed session) fails, re-checks at 15s, and is
+restarted on the third failure, with per-connection state reset and recovery on reconnect;
+a reply from another node number, of the wrong admin variant, or with a changed firmware
+version each fail with a precise reason; a reconfigure re-takes the baseline; a stalled
+configuration dump fails after the grace period; silence trips, clears on a packet, and
+`silence_after: 0` disables it. Through the real `MeshListener`: an encrypted packet from
+another node sets `lastAirPacketAt` and our own does not; the heartbeat fires every five
+minutes and stops at teardown; `restart()` tears down once and schedules exactly one
+reconnect. End to end through the scheduler, a dead radio was restarted 63s after start.
+`/api/status` carries the watchdog over HTTP, reading `pending` with no radio.
+
 **Not verified, and the first things to check with hardware in hand:**
+
+- **That a self-addressed admin request is answered over serial the way the stub
+  answers it.** Firmware source says yes (`MeshModule::callModules` replies to a local
+  `wantResponse`, and the web client relies on the same path for local config reads), but
+  it has not been observed. If every self-check times out against a radio that is plainly
+  working, this is why, and the watchdog will restart the link every few minutes — set
+  `watchdog.enabled: false` until it is sorted.
+- **That the heartbeat actually cures the 15-minute stall.** Leave the server idle for
+  30 minutes and confirm packets are still arriving.
 
 - Anything involving a real radio: serial connect *succeeding*, the NodeDB dump on
   `configure()`, reconnect after unplug, and every ingest path. All of it is written
@@ -906,7 +974,11 @@ and a bad request.
 
 Next, roughly in order of value:
 
-- Bench-test against a real radio and settle §12.
+- Bench-test against a real radio and settle §12, including the watchdog's self-check.
+- A remedy for air silence. Reconnecting cannot help a hung transceiver; an admin
+  `rebootSeconds` to the local node would. It needs to be opt-in, taken under the radio
+  lock, and limited to once per silent spell, since on a quiet mesh it would otherwise
+  reboot the node every `silence_after`.
 - Telemetry charts on the detail page (the history table is honest about gaps; a chart must
   not draw a line straight through an outage).
 - Widen the writable settings beyond names, one field at a time.

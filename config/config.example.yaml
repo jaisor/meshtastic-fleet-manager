@@ -89,6 +89,39 @@ serial:
   # Set false to run the UI with no radio attached (useful for development).
   enabled: true
 
+# Checks that the USB-attached radio is still working, not merely attached.
+#
+# An open serial port proves very little: firmware closes its end of the API
+# session after 15 minutes without contact while the port stays open, and
+# from here that looks exactly like a quiet mesh. So on a schedule the
+# watchdog asks the local node for its own metadata -- over USB only, no
+# airtime -- checks the answer against what it said on connect, and restarts
+# the serial link when it stops answering correctly.
+#
+# (The 15-minute cutoff itself is prevented by a heartbeat the server always
+# sends every 5 minutes, watchdog or not. The watchdog is for whatever else
+# goes wrong.)
+watchdog:
+  enabled: true
+
+  # Between self-checks while healthy. After a failure it re-checks every
+  # 15s, so a dead link is restarted in about a minute either way.
+  interval: 2m
+
+  # How long one self-check may take. It never leaves the USB cable, so a
+  # healthy radio answers in well under a second.
+  timeout: 10s
+
+  # Consecutive failed self-checks before the serial link is restarted.
+  failures_before_restart: 3
+
+  # Flag the radio as "nothing heard" when no other node has been heard over
+  # the air for this long. Reported only, never acted on: a deaf receiver
+  # and a quiet mesh look identical from here. Nodes send device telemetry
+  # every 30 minutes by default, so 2h is several missed reports from every
+  # node at once. Set 0 for a fleet of one, which is always silent.
+  silence_after: 2h
+
 database:
   # The DIRECTORY must be writable, not just the file: WAL mode creates
   # -wal and -shm siblings next to it.

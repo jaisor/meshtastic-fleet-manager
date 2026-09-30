@@ -14,6 +14,7 @@ import { AdminClient } from "./mesh/admin.js";
 import { CapabilityProber } from "./mesh/capability.js";
 import { NodeEnricher } from "./mesh/enrich.js";
 import { RadioTaskRegistry } from "./mesh/tasks.js";
+import { RadioWatchdog } from "./mesh/watchdog.js";
 import { registerAuthRoutes, requireSession, SessionStore } from "./auth.js";
 import { UserRepository } from "./db/repositories/users.js";
 import { registerApiRoutes } from "./routes/api.js";
@@ -125,6 +126,20 @@ async function main(): Promise<void> {
     interval: config.fleet.admin_probe_interval,
   });
 
+  // Only meaningful with a radio to watch; with serial off there is nothing
+  // to ask, and the status reports no watchdog rather than a failing one.
+  const watchdog =
+    config.serial.enabled && config.watchdog.enabled
+      ? new RadioWatchdog({
+          listener,
+          logger: app.log,
+          interval: config.watchdog.interval,
+          timeout: config.watchdog.timeout,
+          failuresBeforeRestart: config.watchdog.failures_before_restart,
+          silenceAfter: config.watchdog.silence_after,
+        })
+      : null;
+
   await app.register(cookie, { secret: config.sessionSecret });
 
   const auth = {
@@ -153,6 +168,7 @@ async function main(): Promise<void> {
       tasks,
       auth,
       enricher,
+      watchdog,
     });
     registerAdminRoutes(scope, { auth, users, db });
   });
@@ -162,6 +178,7 @@ async function main(): Promise<void> {
   if (config.serial.enabled) {
     listener.start();
     prober.start();
+    watchdog?.start();
   } else {
     app.log.warn("serial.enabled is false; running without a radio");
   }
@@ -177,6 +194,7 @@ async function main(): Promise<void> {
     clearInterval(pruneTimer);
     prober.stop();
     enricher.stop();
+    watchdog?.stop();
     await listener.stop();
     await app.close();
     db.close();

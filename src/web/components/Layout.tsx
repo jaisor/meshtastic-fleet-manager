@@ -132,17 +132,40 @@ function DegradedBanner({ radio }: { radio: RadioStatus }) {
 
 function RadioPill({ radio }: { radio: RadioStatus }) {
   if (radio.connected) {
-    // Undecodable frames are surfaced only in the tooltip: a handful after
-    // connect is normal resynchronization, so promoting it to a visible
-    // warning would cry wolf. Someone chasing missing packets will look.
-    const decodeNote =
-      radio.decodeErrors > 0
-        ? ` · ${radio.decodeErrors} undecodable frame${radio.decodeErrors === 1 ? "" : "s"} since connect`
-        : "";
+    const tooltip = connectedTooltip(radio);
+    const watchdog = radio.watchdog;
+
+    // Amber for both: the console still works and every row is real, but
+    // nothing new is arriving -- the same meaning amber carries when the
+    // radio is unplugged. Neither earns the banner: a failing self-check
+    // either recovers or turns into a restart within a minute or two, and a
+    // silent mesh may simply be a quiet one.
+    if (watchdog?.state === "failing") {
+      return (
+        <AmberPill title={tooltip}>
+          Radio not answering
+          <span className="hidden sm:inline">
+            {" "}
+            — {watchdog.consecutiveFailures}/{watchdog.failuresBeforeRestart}
+          </span>
+        </AmberPill>
+      );
+    }
+    if (watchdog?.silent) {
+      return (
+        <AmberPill title={tooltip}>
+          Nothing heard
+          <span className="hidden sm:inline">
+            {" "}
+            since {relativeTime(radio.lastAirPacketAt).replace(/ ago$/, "")}
+          </span>
+        </AmberPill>
+      );
+    }
 
     return (
       <span
-        title={`${radio.portPath}${radio.configured ? "" : " (still configuring)"}${decodeNote}`}
+        title={tooltip}
         className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300 [corner-shape:bevel]"
       >
         <span aria-hidden className="h-2 w-2 rounded-full bg-emerald-500" />
@@ -157,13 +180,77 @@ function RadioPill({ radio }: { radio: RadioStatus }) {
 
   // Matches the banner's amber: the console works, it is just read-only.
   return (
+    <AmberPill title={`${detail}${radio.lastErrorText ? ` ${radio.lastErrorText}` : ""}`}>
+      {radio.enabled ? "Radio disconnected" : "Radio off"}
+      <span className="hidden sm:inline">— read-only</span>
+    </AmberPill>
+  );
+}
+
+function AmberPill({ title, children }: { title: string; children: ReactNode }) {
+  return (
     <span
-      title={`${detail}${radio.lastErrorText ? ` ${radio.lastErrorText}` : ""}`}
+      title={title}
       className="inline-flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-300 [corner-shape:bevel]"
     >
       <span aria-hidden className="h-2 w-2 rounded-full bg-amber-500" />
-      {radio.enabled ? "Radio disconnected" : "Radio off"}
-      <span className="hidden sm:inline">— read-only</span>
+      {children}
     </span>
   );
+}
+
+/**
+ * Everything the watchdog knows, one fact per line.
+ *
+ * Tooltip rather than page: this is for someone already chasing a problem,
+ * and the pill's color has told everyone else what they need.
+ */
+function connectedTooltip(radio: RadioStatus): string {
+  const lines = [
+    `${radio.portPath}${radio.configured ? "" : " (still configuring)"}`,
+  ];
+
+  const watchdog = radio.watchdog;
+  if (watchdog) {
+    if (watchdog.state === "failing") {
+      lines.push(
+        `Self-check failed ${watchdog.consecutiveFailures} of ${watchdog.failuresBeforeRestart} times in a row; the link restarts at ${watchdog.failuresBeforeRestart}.`,
+      );
+      if (watchdog.lastFailureText) lines.push(watchdog.lastFailureText);
+    } else if (watchdog.state === "ok") {
+      lines.push(
+        `Self-check OK ${relativeTime(watchdog.lastOkAt)}` +
+          (watchdog.lastLatencyMs !== null ? ` (${watchdog.lastLatencyMs} ms)` : ""),
+      );
+    } else {
+      lines.push("Self-check pending");
+    }
+    if (watchdog.firmwareVersion) lines.push(`Firmware ${watchdog.firmwareVersion}`);
+    if (watchdog.restarts > 0) {
+      lines.push(
+        `Watchdog restarted the link ${watchdog.restarts} time${watchdog.restarts === 1 ? "" : "s"}, last ${relativeTime(watchdog.lastRestartAt)}: ${watchdog.lastRestartReason ?? "no reason recorded"}`,
+      );
+    }
+  }
+
+  lines.push(
+    radio.lastAirPacketAt
+      ? `Last heard over the air ${relativeTime(radio.lastAirPacketAt)}`
+      : "Nothing heard over the air since startup",
+  );
+  if (watchdog?.silent) {
+    lines.push(
+      "The radio answers over USB but is hearing nothing from other nodes. That is either a quiet mesh or a receiver that has stopped working.",
+    );
+  }
+
+  // Undecodable frames are surfaced only here: a handful after connect is
+  // normal resynchronization, so promoting it to a visible warning would
+  // cry wolf. Someone chasing missing packets will look.
+  if (radio.decodeErrors > 0) {
+    lines.push(
+      `${radio.decodeErrors} undecodable frame${radio.decodeErrors === 1 ? "" : "s"} since connect`,
+    );
+  }
+  return lines.join("\n");
 }

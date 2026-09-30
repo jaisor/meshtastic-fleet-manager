@@ -14,6 +14,17 @@ import type { RadioStatus } from "../../shared/types.js";
  * can say "the radio is gone" rather than showing hours-old rows as live.
  */
 
+/**
+ * Firmware closes its end of the serial API session after 15 minutes without
+ * a byte from the client (`SERIAL_CONNECTION_TIMEOUT`, SerialConsole.cpp).
+ * After that `PhoneAPI::available()` is false: the port stays open, nothing
+ * errors, and no packet ever reaches us again -- a radio that looks connected
+ * and has gone deaf. We transmit only on probes and operator actions, so an
+ * idle server hit this every time. A heartbeat is a ToRadio like any other and
+ * resets that clock; five minutes leaves two to spare before the cutoff.
+ */
+const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
+
 /** USB vendor IDs seen on Meshtastic hardware and their USB-serial bridges. */
 const KNOWN_VENDOR_IDS = new Set([
   "239a", // Adafruit / nRF52 boards
@@ -40,8 +51,16 @@ export class MeshListener extends EventEmitter {
   private stopped = false;
   private attempt = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private keepaliveTimer: NodeJS.Timeout | null = null;
+  /**
+   * Bumped by every connection attempt. `configure()` can settle long after
+   * its connection was torn down -- the library resolves `wantConfigId` on a
+   * 60s timeout rather than on the reply -- and a stale attempt must not
+   * announce a dead device or schedule a second reconnect.
+   */
+  private generation = 0;
 
-  private status: RadioStatus = {
+  private status: Omit<RadioStatus, "watchdog"> = {
     connected: false,
     configured: false,
     enabled: true,
@@ -51,6 +70,7 @@ export class MeshListener extends EventEmitter {
     lastConnectedAt: null,
     decodeErrors: 0,
     lastDecodeErrorAt: null,
+    lastAirPacketAt: null,
   };
 
   constructor(private readonly options: ListenerOptions) {
@@ -59,7 +79,8 @@ export class MeshListener extends EventEmitter {
     this.status.enabled = options.enabled;
   }
 
-  getStatus(): RadioStatus {
+  /** Everything but the watchdog's half, which the watchdog reports itself. */
+  getStatus(): Omit<RadioStatus, "watchdog"> {
     return { ...this.status };
   }
 
@@ -87,7 +108,28 @@ export class MeshListener extends EventEmitter {
     await this.teardown();
   }
 
+  /**
+   * Drops a link that is open but no longer working, and reconnects.
+   *
+   * For the watchdog: the port is fine as far as the OS knows, so nothing
+   * else would ever notice. Reconnecting sends a fresh `wantConfigId`, which
+   * is what reopens the firmware's API session. Anything waiting on the mesh
+   * is told first, as on an unplug, so it gives up now instead of timing out.
+   */
+  restart(reason: string): void {
+    if (this.stopped || !this.status.connected) return;
+    this.options.logger.warn({ reason }, "restarting serial link");
+    this.status.lastErrorText = reason;
+    this.emit("disconnected");
+    this.attempt = 0;
+    void this.teardown().then(() => this.scheduleReconnect());
+  }
+
   private async teardown(): Promise<void> {
+    if (this.keepaliveTimer) {
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
     const transport = this.transport;
     this.transport = null;
     this.device = null;
@@ -104,6 +146,7 @@ export class MeshListener extends EventEmitter {
 
   private async connectLoop(): Promise<void> {
     if (this.stopped) return;
+    const generation = ++this.generation;
 
     try {
       const path = await resolvePort(this.options.portPath);
@@ -125,14 +168,17 @@ export class MeshListener extends EventEmitter {
       this.status.lastDecodeErrorAt = null;
       this.status.lastConnectedAt = Math.floor(Date.now() / 1000);
       this.attempt = 0;
+      this.startKeepalive(device);
 
       // `configure()` asks the radio to dump its full state: MyNodeInfo, the
       // channel list, config, and every node in its NodeDB. That dump is
       // where the fleet comes from on a cold start -- discovery does not
       // have to wait for each node to transmit again.
       await device.configure();
+      if (generation !== this.generation || this.device !== device) return;
       this.emit("connected", device);
     } catch (cause) {
+      if (generation !== this.generation) return;
       const message = cause instanceof Error ? cause.message : String(cause);
       this.status.lastErrorText = message;
       this.options.logger.warn({ err: message }, "serial connection failed");
@@ -142,7 +188,9 @@ export class MeshListener extends EventEmitter {
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped) return;
+    // Two failure paths can both land here for one dead connection -- an
+    // unplug seen by the status event and by `configure()` rejecting.
+    if (this.stopped || this.reconnectTimer) return;
     const ladder = this.options.backoff;
     const delay = ladder[Math.min(this.attempt, ladder.length - 1)] ?? 5;
     this.attempt += 1;
@@ -151,6 +199,25 @@ export class MeshListener extends EventEmitter {
       this.reconnectTimer = null;
       void this.connectLoop();
     }, delay * 1000);
+  }
+
+  /**
+   * Holds the firmware's API session open; see `KEEPALIVE_INTERVAL_MS`.
+   *
+   * Our own timer rather than the library's `setHeartbeatInterval`, which is
+   * cleared only by a `DeviceDisconnected` status and so would keep writing to
+   * a transport we tore down ourselves.
+   */
+  private startKeepalive(device: MeshDevice): void {
+    this.keepaliveTimer = setInterval(() => {
+      device.heartbeat().catch((cause: unknown) => {
+        this.options.logger.debug(
+          { err: cause instanceof Error ? cause.message : String(cause) },
+          "heartbeat to radio failed",
+        );
+      });
+    }, KEEPALIVE_INTERVAL_MS);
+    this.keepaliveTimer.unref();
   }
 
   /**
@@ -234,6 +301,11 @@ export class MeshListener extends EventEmitter {
      */
     let inMeshPacket = false;
     device.events.onMeshPacket.subscribe((p) => {
+      // Encrypted packets count: the radio could not open them, but it did
+      // hear them, which is the thing in question.
+      if (p.from !== this.status.localNodeNum && !p.viaMqtt) {
+        this.status.lastAirPacketAt = Math.floor(Date.now() / 1000);
+      }
       inMeshPacket = true;
       queueMicrotask(() => {
         inMeshPacket = false;

@@ -59,6 +59,28 @@ const schema = z.object({
       enabled: z.boolean().default(true),
     })
     .prefault({}),
+  /**
+   * Periodically asks the local node a question with a known answer, and
+   * restarts the serial link when it stops answering.
+   */
+  watchdog: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Between self-checks while healthy. */
+      interval: duration
+        .pipe(z.number().min(10).max(3600))
+        .default(120),
+      /** How long one self-check may take. Over USB, not the air. */
+      timeout: duration.pipe(z.number().min(1).max(120)).default(10),
+      /** Consecutive failed self-checks before the link is restarted. */
+      failures_before_restart: z.number().int().min(1).max(20).default(3),
+      /**
+       * Report the radio as silent when nothing has been heard over the air
+       * for this long. 0 turns it off, which suits a fleet of one.
+       */
+      silence_after: duration.default(2 * 3600),
+    })
+    .prefault({}),
   database: z
     .object({
       path: z.string().default("/data/fleet.db"),

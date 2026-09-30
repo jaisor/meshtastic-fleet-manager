@@ -220,6 +220,56 @@ export interface RadioStatus {
    */
   decodeErrors: number;
   lastDecodeErrorAt: number | null;
+  /**
+   * Last packet the radio heard over the air from another node, decodable
+   * or not, excluding MQTT. The only evidence available here that the LoRa
+   * receiver still works: the watchdog's self-check proves the USB link and
+   * the firmware, and says nothing about the transceiver.
+   */
+  lastAirPacketAt: number | null;
+  /** Null when `watchdog.enabled` is off. */
+  watchdog: RadioWatchdogStatus | null;
+}
+
+/**
+ * The radio watchdog's view of the local node.
+ *
+ * An open serial port is not a working radio. The firmware can close its end
+ * of the API session while the port stays open, and from the host side that
+ * looks exactly like a quiet mesh. The watchdog asks the node a question
+ * with a known answer, on a schedule, and restarts the link when it stops
+ * answering.
+ *
+ * - `pending`: no self-check has completed on this connection yet.
+ * - `ok`: the last self-check answered, and matched the connection's baseline.
+ * - `failing`: one or more self-checks in a row went unanswered or answered
+ *   wrongly. The link is restarted after `failures_before_restart`.
+ */
+export type WatchdogState = "pending" | "ok" | "failing";
+
+export interface RadioWatchdogStatus {
+  state: WatchdogState;
+  lastCheckAt: number | null;
+  lastOkAt: number | null;
+  /** Round trip of the last successful self-check, over USB only. */
+  lastLatencyMs: number | null;
+  consecutiveFailures: number;
+  failuresBeforeRestart: number;
+  lastFailureText: string | null;
+  /** Serial restarts the watchdog forced since the server started. */
+  restarts: number;
+  lastRestartAt: number | null;
+  lastRestartReason: string | null;
+  /**
+   * Nothing heard over the air for longer than `silence_after`. Reported,
+   * not acted on: a quiet mesh and a deaf transceiver are indistinguishable
+   * from here, and only one of them is a fault.
+   */
+  silent: boolean;
+  /** Seconds; null when silence detection is off. */
+  silenceAfter: number | null;
+  /** What the node reported on this connection's first self-check. */
+  firmwareVersion: string | null;
 }
 
 /**
