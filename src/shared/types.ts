@@ -112,10 +112,80 @@ export interface PositionPoint {
   altitude: number | null;
 }
 
+/**
+ * A node's radio and module settings.
+ *
+ * Unlike everything else about a node, none of this arrives on its own:
+ * nothing on the mesh broadcasts a LoRa preset or a telemetry interval. The
+ * local radio's values come from its config dump over USB; a remote node's
+ * come from admin reads, so they exist only for nodes the local node may
+ * administer and only once someone has asked.
+ *
+ * Every field is nullable and null means **not read**, never "off" or
+ * "zero" -- rendering an unread interval as 0 would invent a setting. That
+ * is why `fetchedAt` belongs to the whole snapshot rather than each field.
+ */
+export interface NodeRadioConfig {
+  /** When this snapshot was taken. */
+  fetchedAt: number;
+
+  region: string | null;
+  /**
+   * Named preset, e.g. `LONG_FAST`. Meaningless when `usesPreset` is false:
+   * the node is then running the explicit bandwidth/spread/coding values
+   * below and the preset field is left at whatever it last held.
+   */
+  modemPreset: string | null;
+  usesPreset: boolean | null;
+  bandwidth: number | null;
+  spreadFactor: number | null;
+  codingRate: number | null;
+  /**
+   * LoRa frequency slot within the region's band. Nodes must agree on this
+   * *and* the preset to hear each other at all.
+   */
+  frequencySlot: number | null;
+  hopLimit: number | null;
+  txPower: number | null;
+  txEnabled: boolean | null;
+
+  /** Seconds between NodeInfo broadcasts. */
+  nodeInfoInterval: number | null;
+  /** Seconds between position broadcasts. */
+  positionInterval: number | null;
+  gpsUpdateInterval: number | null;
+
+  /**
+   * Device-metrics cadence. There is no companion enable flag here, unlike
+   * the other sensor classes: firmware's is `deviceTelemetryEnabled`, which
+   * `@meshtastic/core`'s bundled protobufs predate, so the decoder that
+   * actually runs drops it. See CLAUDE.md section 4.
+   */
+  deviceMetricsInterval: number | null;
+  environmentInterval: number | null;
+  environmentEnabled: boolean | null;
+  airQualityInterval: number | null;
+  airQualityEnabled: boolean | null;
+  powerInterval: number | null;
+  powerEnabled: boolean | null;
+  healthInterval: number | null;
+  healthEnabled: boolean | null;
+}
+
+/** Which of the four config reads answered, for reporting a partial result. */
+export interface ConfigReadOutcome {
+  lora: boolean;
+  device: boolean;
+  position: boolean;
+  telemetry: boolean;
+}
+
 export interface NodeDetail {
   node: FleetNode;
   telemetry: TelemetryPoint[];
   positions: PositionPoint[];
+  /** Null when nobody has read this node's settings yet. */
+  config: NodeRadioConfig | null;
 }
 
 /**
@@ -160,7 +230,7 @@ export interface RadioStatus {
  * `RadioTaskKind` as new operations are added -- traceroute is the obvious
  * next one.
  */
-export type RadioTaskKind = "probe" | "config" | "refresh";
+export type RadioTaskKind = "probe" | "config" | "refresh" | "readConfig";
 
 /**
  * What the discovery policy currently admits. Surfaced so an empty fleet
@@ -173,6 +243,26 @@ export interface DiscoverySummary {
   restricted: boolean;
   /** Human phrasing of the criteria, e.g. `channel 2, message containing "join"`. */
   description: string;
+}
+
+/**
+ * What is currently holding the radio, if anything.
+ *
+ * The radio is exclusive — one operation at a time — so this is what lets the
+ * UI disable a control *and say why* instead of letting someone click into a
+ * 409. It reports **background work too**, which `tasks` deliberately omits:
+ * the capability prober's sweeps occupy the radio without anyone waiting on
+ * them, and a button that looks available while the server would refuse it is
+ * the worst of both worlds.
+ */
+export interface RadioOccupancy {
+  /** Short description, e.g. "Checking admin access". */
+  label: string;
+  nodeId: string;
+  nodeName: string | null;
+  startedAt: number;
+  /** True for work no one is waiting on, which the task banner does not show. */
+  background: boolean;
 }
 
 export interface RadioTask {

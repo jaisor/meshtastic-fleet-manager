@@ -116,7 +116,7 @@ src/server/
   db/
     index.ts                 connection, pragmas (WAL), migration runner
     migrations.ts            ordered array of {name, sql}; forward-only
-    repositories/nodes.ts    nodes, telemetry, positions
+    repositories/nodes.ts    nodes, telemetry, positions, settings snapshots
     repositories/adminOperations.ts   the remote-write audit log
   mesh/
     nodeId.ts                nodeNum <-> "!hex" conversion
@@ -124,6 +124,7 @@ src/server/
     ingest.ts                packet -> repository writes, behind the discovery gate
     discovery.ts             pure admission rules
     enrich.ts                asks new nodes to introduce themselves
+    radioConfig.ts           protobuf config <-> the stored settings snapshot
     admin.ts                 AdminMessage build/send/correlate, session passkey
     capability.ts            periodic admin probe sweep
     tasks.ts                 registry of user-initiated operations + cancellation
@@ -170,8 +171,18 @@ Meshtastic JS packages move fast and `transport-node-serial` is pre-1.0.
 - **There is no `onAdminPacket` event.** Admin responses must be picked out of
   `onMeshPacket` by filtering `portnum === PortNum.ADMIN_APP` (6) and decoding the payload
   with `AdminMessageSchema`. This is the main reason `mesh/admin.ts` exists as its own module.
+- **`onConfigPacket` and `onModuleConfigPacket` each have two dispatch sites and carry no
+  node number.** `handleFromRadio` emits them for the *local* radio's config dump during
+  `configure()`; `handleDecodedPacket` emits them again for a *remote* node's
+  `getConfigResponse`. Subscribing naively files a remote node's LoRa settings as the local
+  radio's — silently, and the local node is the one whose values look plausible enough not
+  to be questioned. They are distinguishable only by origin: an admin response always
+  arrives inside a MeshPacket dispatch, the local dump never does. `listener.ts` sets a flag
+  for the duration of that dispatch and re-emits only the local case, as `localConfig` /
+  `localModuleConfig`. Remote reads belong to `AdminClient`, which correlates them by
+  `requestId`.
 
-**Three landmines in these packages, all hit during the first build:**
+**Four landmines in these packages:**
 
 1. `@meshtastic/core` and `@meshtastic/transport-node-serial` declare
    `preinstall: npx only-allow pnpm`. With npm lifecycle scripts enabled that **aborts the
@@ -211,6 +222,28 @@ Meshtastic JS packages move fast and `transport-node-serial` is pre-1.0.
    `new TransportNodeSerial(port)`. Revert to the factory only once this is fixed upstream.
    `disconnect()` has the same `port.close()` shape but is safe, because the transport
    constructor leaves a permanent `error` listener attached.
+
+4. **`@meshtastic/core` bundles its own, older copy of the protobufs, and that copy is what
+   decodes everything at runtime.** `Protobuf.*` re-exported from core is not the same object
+   as the matching schema from `@meshtastic/protobufs` 2.8.0 — verified by identity
+   comparison, not assumed. The types, however, resolve to 2.8.0, so **a field added since
+   core's snapshot typechecks fine and is `undefined` at runtime**: it is not in the decoder's
+   schema, so the bytes land in unknown fields and are dropped. There is no error.
+
+   Concretely, in `ModuleConfig.TelemetryConfig` the bundled copy lacks
+   `deviceTelemetryEnabled` and `airQualityScreenEnabled`; in `Config.LoRaConfig` it lacks
+   `femLnaMode` and `serialHalOnly`. That cost a real bug: `deviceTelemetryEnabled` read as
+   `undefined`, and a `value ? 1 : 0` store turned it into `false`, i.e. "device telemetry is
+   switched off" on every node in the fleet. The device-metrics enable flag is therefore not
+   surfaced at all — see `mesh/radioConfig.ts`.
+
+   **So: before reading a config field, check it exists in core's copy**, not just in the
+   types. `Schema.fields.map(f => f.localName)` on both and diff them. And map absence to
+   null rather than to a value — `radioConfig.ts` funnels every read through `num()` /
+   `bool()` for exactly this reason, so version skew degrades to "not read" instead of
+   inventing a setting. Do not "fix" this by decoding with the direct package on paths where
+   the library does the decoding; there, the bundled copy wins and the field is genuinely
+   gone.
 
 ---
 
@@ -649,10 +682,110 @@ bloom over near-black.
   **`enqueue` defers its drain by a tick on purpose.** The ingest admits a node *before* it
   writes the row, so draining inline looked the node up, found nothing and dropped it
   silently — a bug a unit test missed because it had seeded the row first.
+- **A node's settings are read on demand, never swept** (`mesh/radioConfig.ts`, the
+  `node_config` table, `POST /api/nodes/:id/config/read`). LoRa preset, frequency slot and
+  the broadcast/sensor intervals are the one class of node information that never arrives on
+  its own: nothing on the mesh broadcasts them. The local radio's come free with its config
+  dump over USB on every connect. A remote node's take **four sequential admin reads**, which
+  is why they are requested rather than polled -- nothing about a setting expires, it changes
+  when somebody changes it, so sweeping the fleet for config would spend the duty cycle
+  re-learning constants. The reads are sequential on purpose: four at once collide on the air
+  more often than they save time.
+  **A partial read is reported, not smoothed over.** Each read that fails leaves its fields
+  null and the response says which answered, because a blank interval is otherwise
+  indistinguishable from a setting that is genuinely unset. A read where *nothing* answered
+  leaves any previous snapshot alone rather than replacing it with blanks stamped with now,
+  and `saveConfig` replaces the row wholesale so `fetchedAt` always describes one moment --
+  merging a fresh LoRa read over month-old intervals would produce a row that never existed
+  on any node.
+  **Answering an admin read is recorded as proof of admin rights**, since otherwise the badge
+  can read "Unprobed" next to settings that could only have been obtained with those rights.
+  **Firmware's `0` is a setting, not an absence.** On most of these fields it means "use the
+  built-in default", and on `channelNum` it means "derive the slot from the channel name". A
+  node with `deviceUpdateInterval: 0` reports every half hour, so rendering it as `0s` or
+  "never" would be wrong; `format.ts:interval` prints "Default" and null prints an em dash.
+  **These settings are deliberately read-only.** Changing a remote node's preset, frequency
+  slot or region is the one write that cannot be undone from here: the node applies it, leaves
+  the channel this console can reach, and is beyond recall without physical access. The
+  intervals carry no such risk and are the sensible place to widen writes first.
+- **Editing requires a confirmed admin verdict, not just the right role.** The pencil appears
+  only when `adminCapability === "capable"` — `capable` specifically, never "anything but
+  unauthorized", because `unknown` means nobody has asked yet and treating it as permission
+  reintroduces the failure this gate exists to prevent: an admin write to a node we have no
+  rights on fails *slowly*, after a mesh round trip and a timeout, having logged an operation
+  that makes it look as though something was attempted. The same gate covers the settings read,
+  which needs identical rights and is four round trips, so it would burn four timeouts to
+  report nothing. Each non-capable verdict gets its own advice (`CAPABILITY_ADVICE`), and the
+  route out of all of them is the probe, which stays ungated because finding out is its job.
+  **Refresh from node is deliberately *not* gated** — it asks for NodeInfo, telemetry and
+  position with `wantResponse`, which any node answers whatever our admin rights, so requiring
+  a verdict there would withhold a working feature.
+  **This is an affordance, not a boundary.** The server does not check capability before a
+  write and must not: the verdict is a cached probe result, so refusing on it would block a
+  legitimate rename on a node whose `admin_key` was updated a minute ago and not yet re-probed.
+  Confirmed by calling every write endpoint for all four verdicts — each answers 503 (no radio),
+  never 403, i.e. the server gates on the radio and the role, not the verdict.
+  An editor already open stays open even if the verdict flips to `unauthorized` underneath it,
+  which is exactly what a failed write does: discarding someone's typed value at the moment the
+  error appears is the wrong trade, and the pencil is simply gone once they cancel.
+- **The writable fields are edited in place, next to the values they change**
+  (`EditableField` in `pages/NodeDetail.tsx`). A pencil flips the field to an input; Enter
+  sends, Escape discards. The editor stays open until the remote confirms and keeps the typed
+  value on failure -- closing it and restoring the old name would both lose the edit and imply
+  the change had landed, and "it may or may not have been applied" is a state the operator has
+  to be able to see. The draft is seeded on open and deliberately **not** synced from props
+  afterwards, because the page reloads after every save and the status poll runs on its own
+  schedule, either of which would otherwise overwrite what someone is typing.
+  This replaced a separate form restating the same names lower down the page, which meant two
+  places showing one value and a save button a long way from the field.
+- **`radioConnected` and `canOperate` are separate props, not one conjunction.** They were
+  conflated, and it read badly: a viewer was told the *radio* was disconnected. A viewer now
+  sees no editing affordance at all -- a disabled pencil advertises a capability they do not
+  have and sends them looking for why -- while an operator with an unplugged radio sees the
+  control, disabled, naming the radio. The server enforces both regardless; verified by
+  hitting every write endpoint as a viewer and getting 403.
+- **The radio is exclusive: one operation at a time** (`mesh/tasks.ts`). There is one
+  transceiver and a duty cycle shared with the whole mesh, so two admin exchanges in flight
+  together contend for airtime and stretch each other's timeouts, making a slow link look
+  like a broken one. `RadioTaskRegistry.start` **refuses rather than queues**, returning null;
+  a queue would leave someone watching a button that did nothing for a minute, and "the radio
+  is busy doing X" is more useful than a silent wait. The check and the insert are one
+  synchronous block, which is what makes it a lock — Node runs one thing at a time, so two
+  requests cannot both see it free.
+  **Routes answer 409, not 503.** 503 means "there is no radio"; 409 means "the radio is here
+  and busy", and those have different remedies. The message names the occupant.
+  **Three radio users, three different relationships to the lock**, and the asymmetry is the
+  design, not an oversight:
+  • *Routes* take it and refuse if they cannot.
+  • *The capability sweep* takes it per individual probe and releases between each — holding
+  it for a whole sweep would lock an operator out for a minute at a time — and abandons the
+  rest of its batch the moment it cannot get it, because nobody is waiting on a sweep and
+  those nodes are still due next time.
+  • *The automatic enricher* consults it but never takes it. LoRa is half-duplex, so
+  transmitting while an admin exchange waits for its reply can make us miss that reply; but
+  nothing of the enricher's own is at risk the other way, since its requests are one-shot with
+  no correlated response to lose. It holds its queue and retries rather than dropping nodes.
+  Taking the lock there would be worse than useless: a discovery burst can queue fifty nodes,
+  so it would refuse an operator's clicks for minutes.
+  **Background work occupies the radio without appearing in the banner.** `list()` filters it
+  out — a banner appearing on its own schedule teaches people to ignore banners — but
+  `occupancy()` reports it, and `/api/status` carries that as `radioBusy` alongside `tasks`.
+  Without the second field the buttons would look available while the server refused them,
+  which is the worst of both. The status poll's fast cadence follows `radioBusy`, not `tasks`,
+  or controls would stay dead for 15s after a sweep ended.
+  **The UI gates on the server's view *and* its own in-flight request.** The server's arrives
+  by poll, so between clicking one button and the next poll every other control still looks
+  available; `ownRequest` closes that window locally. One `blockedReason` string covers every
+  control on the node page, so adding a control cannot leave it enabled by omission, and
+  "no radio" outranks "busy" because it is the more fundamental problem.
+  An editor already open is not closed by the radio going busy — only its save button and its
+  Enter key go dead, so a half-typed name is not thrown away because a sweep started.
 - **Every user-initiated mesh operation registers a task** (`mesh/tasks.ts`) so the UI can
   say what the radio is busy with, from any page, and offer a way out. A mesh round trip
   runs to tens of seconds and the operator has usually navigated elsewhere by then, so a
   spinner on the originating button is not enough on its own.
+  `readConfig` was added this way and is the worked example to copy. A new operation must also
+  handle `start` returning null — the compiler enforces it, since the return type is nullable.
   **Adding an operation** — traceroute is next — means: a new `RadioTaskKind` in
   `shared/types.ts`, an `AbortSignal` parameter threaded down to the `AdminClient.request`
   that waits, and `tasks.start(...)` / `tasks.finish(...)` in a `try/finally` around it.
@@ -706,6 +839,35 @@ no console errors, no failed requests. Confirmed inside the container: it runs a
 the healthcheck reports `healthy` with exit 0. The healthcheck's config-reading was proved
 rather than assumed by running a second container with `server.port: 9001` — it went
 healthy on 9001, which a hardcoded 8432 could not have done.
+
+**Node settings are verified end to end against the real library** (2026-09-29), not just
+typechecked. A stub transport feeds framed `FromRadio` messages into a real `MeshDevice`
+wired through the production `MeshListener`, which proved: the local radio's LoRa, device,
+position and telemetry config all land in `node_config` from its USB dump; firmware's `0`
+survives as `0` rather than being nulled; the enable flags stay distinct from "not read";
+and — the point of the exercise — **a remote node's admin `getConfigResponse` does not
+overwrite the local radio's snapshot**, which is what the naive subscription would have done.
+The remote read path is verified against a stubbed device that answers two of the four reads
+and stays silent on the others: all four requests go out in order, the answered values land,
+the silent ones stay null, the outcome reports which, and one silent read does not abort the
+sequence.
+
+**The radio lock is verified** (2026-09-29) at both levels. Directly: a second caller is
+refused rather than queued, `finish` releases, background work takes the lock while staying out
+of `list()` and still showing in `occupancy()`, and `cancelAll` aborts background work too. The
+capability sweep performs no probes while the radio is held and resumes once it is free; the
+enricher sends nothing while it is held and transmits once it frees up. Over HTTP, with a
+stubbed radio that never answers but honours its abort signal: a second probe, a refresh, a
+settings read and a rename all return 409 with a message naming the occupant, `/api/status`
+reports both `radioBusy` and the task, and cancelling releases the lock so the next operation
+is accepted. What is *not* verified is the disabled-button rendering itself — as with the rest
+of this UI work, only the paths behind it have been exercised.
+
+Over HTTP on a fresh database: the migration applies, `GET /api/nodes/:id` carries the
+snapshot, `POST /api/nodes/:id/config/read` returns 503 with no radio, and **a viewer gets 403
+on every write endpoint** — the settings read, the probe, the refresh and the config PATCH —
+while still reading the node. The inline editors and the settings panel have *not* been
+exercised in a browser; only the data and permission paths behind them have.
 
 Degraded mode is verified in all three states: `serial.enabled: false`, and a configured
 port that does not exist (the server stays up, keeps retrying, and surfaces the real

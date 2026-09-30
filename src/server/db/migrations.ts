@@ -103,4 +103,54 @@ export const migrations: Migration[] = [
       CREATE UNIQUE INDEX idx_users_username ON users(username COLLATE NOCASE);
     `,
   },
+  {
+    name: "004_node_config",
+    sql: `
+      -- A node's radio and module settings, which -- unlike everything else
+      -- in this schema -- never arrive passively. Nothing on the mesh
+      -- broadcasts its LoRa preset or telemetry intervals, so each row is
+      -- either the local radio's own config dump or the result of admin
+      -- reads against a remote node. Hence one timestamp for the whole row
+      -- rather than per field: it is a snapshot taken at a moment, and a
+      -- half-refreshed mix of old and new values would be a lie.
+      --
+      -- Absent means "not read", never "off" or "zero" -- a node we have no
+      -- admin rights on has no row at all, and the UI has to say so rather
+      -- than render blanks that look like settings.
+      CREATE TABLE node_config (
+        node_num                INTEGER PRIMARY KEY REFERENCES nodes(node_num) ON DELETE CASCADE,
+        fetched_at              INTEGER NOT NULL,
+
+        -- Config.LoRaConfig
+        region                  TEXT,
+        modem_preset            TEXT,
+        uses_preset             INTEGER,
+        bandwidth               INTEGER,
+        spread_factor           INTEGER,
+        coding_rate             INTEGER,
+        frequency_slot          INTEGER,
+        hop_limit               INTEGER,
+        tx_power                INTEGER,
+        tx_enabled              INTEGER,
+
+        -- Config.DeviceConfig / Config.PositionConfig broadcast intervals
+        node_info_interval      INTEGER,
+        position_interval       INTEGER,
+        gps_update_interval     INTEGER,
+
+        -- ModuleConfig.TelemetryConfig: interval plus the enable flag for
+        -- each sensor class, because an interval on a disabled sensor is
+        -- configured-but-silent and reads as a fault otherwise.
+        device_metrics_interval INTEGER,
+        environment_interval    INTEGER,
+        environment_enabled     INTEGER,
+        air_quality_interval    INTEGER,
+        air_quality_enabled     INTEGER,
+        power_interval          INTEGER,
+        power_enabled           INTEGER,
+        health_interval         INTEGER,
+        health_enabled          INTEGER
+      );
+    `,
+  },
 ];

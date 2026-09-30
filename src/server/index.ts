@@ -83,9 +83,15 @@ async function main(): Promise<void> {
     enabled: config.serial.enabled,
     logger: app.log,
   });
+  // Declared before anything that uses the radio, because it is the lock they
+  // all share: the enricher defers to it, the prober takes it per probe, and
+  // the routes refuse with 409 when they cannot get it.
+  const tasks = new RadioTaskRegistry();
+
   const enricher = new NodeEnricher({
     listener,
     nodes,
+    tasks,
     logger: app.log,
     enabled: config.discovery.probe_new_nodes,
   });
@@ -101,8 +107,6 @@ async function main(): Promise<void> {
   });
   admin.attach();
 
-  const tasks = new RadioTaskRegistry();
-
   // A task waiting on a radio that just vanished will never be answered;
   // abandon them so the banner clears instead of hanging until timeout.
   listener.on("disconnected", () => {
@@ -116,6 +120,7 @@ async function main(): Promise<void> {
     nodes,
     admin,
     listener,
+    tasks,
     logger: app.log,
     interval: config.fleet.admin_probe_interval,
   });

@@ -5,6 +5,11 @@ import type { NodeRepository } from "../db/repositories/nodes.js";
 import type { DiscoveryRules } from "../config.js";
 import { admits, describeRules, isRestricted } from "./discovery.js";
 import { logNode } from "./nodeId.js";
+import {
+  applyConfig,
+  applyModuleConfig,
+  emptyRadioConfig,
+} from "./radioConfig.js";
 import type { MeshListener } from "./listener.js";
 
 /**
@@ -165,6 +170,55 @@ export function attachIngest(
     return { channel: raw?.channel, viaMqtt: raw?.viaMqtt };
   }
 
+  /**
+   * The local radio's settings, accumulated across its config dump.
+   *
+   * Firmware sends one `Config` message per variant, so a snapshot has to be
+   * built up over several events rather than written from one. It is reset on
+   * each connection: `saveConfig` replaces the row wholesale, and carrying
+   * values across a reconnect would produce a snapshot mixing settings from
+   * before and after a reboot that may well have changed them.
+   */
+  let localConfig = emptyRadioConfig(nowSeconds());
+  let localConfigRead = false;
+
+  listener.on("connected", () => {
+    localConfig = emptyRadioConfig(nowSeconds());
+    localConfigRead = false;
+  });
+
+  /**
+   * Persist the accumulated snapshot, once we know which node it describes.
+   *
+   * Writes nothing until at least one variant has actually been applied. An
+   * all-null row carrying a fresh `fetchedAt` would claim the settings were
+   * read and every one of them unknown, which is worse than no row: the UI
+   * would stop offering to read them.
+   */
+  function saveLocalConfig(): void {
+    if (localNodeNum === null || !localConfigRead) return;
+    localConfig.fetchedAt = nowSeconds();
+    nodes.saveConfig(localNodeNum, localConfig);
+  }
+
+  // These two fire only for the local radio's own dump; the listener drops
+  // the library's duplicate dispatch for remote admin responses, which the
+  // AdminClient correlates by requestId instead.
+  listener.on("localConfig", (config: Protobuf.Config.Config) => {
+    if (!applyConfig(localConfig, config)) return;
+    localConfigRead = true;
+    saveLocalConfig();
+  });
+
+  listener.on(
+    "localModuleConfig",
+    (config: Protobuf.ModuleConfig.ModuleConfig) => {
+      if (!applyModuleConfig(localConfig, config)) return;
+      localConfigRead = true;
+      saveLocalConfig();
+    },
+  );
+
   listener.on("myNodeInfo", (info: Protobuf.Mesh.MyNodeInfo) => {
     localNodeNum = info.myNodeNum;
     nodes.upsert({
@@ -173,6 +227,9 @@ export function attachIngest(
       lastHeardAt: nowSeconds(),
     });
     logger.info(logNode(info.myNodeNum), "local node identified");
+    // The dump sends MyNodeInfo before the config messages, but if that ever
+    // reorders the snapshot would sit in memory with nowhere to go.
+    saveLocalConfig();
   });
 
   /**

@@ -1,8 +1,18 @@
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { Protobuf, Types } from "@meshtastic/core";
 import type { FastifyBaseLogger } from "fastify";
-import type { AdminCapability, NodeConfigUpdate } from "../../shared/types.js";
+import type {
+  AdminCapability,
+  ConfigReadOutcome,
+  NodeConfigUpdate,
+  NodeRadioConfig,
+} from "../../shared/types.js";
 import type { MeshListener } from "./listener.js";
+import {
+  applyConfig,
+  applyModuleConfig,
+  emptyRadioConfig,
+} from "./radioConfig.js";
 import { TaskCancelledError } from "./tasks.js";
 
 /**
@@ -320,6 +330,116 @@ export class AdminClient {
       { case: "setOwner", value: patched },
       { withPasskey: true, signal },
     );
+  }
+
+  /**
+   * Reads everything we surface about a remote node's radio and module
+   * settings: four admin reads, sequentially.
+   *
+   * Sequential rather than concurrent on purpose. Each is a mesh round trip
+   * on a duty-cycled band, and four at once would collide with each other on
+   * the air far more often than they would save time. The whole thing runs
+   * to a couple of minutes on a distant node, which is why it registers a
+   * cancellable task.
+   *
+   * A read that fails does not abort the rest. Firmware answers the config
+   * types it knows and ignores the others, and a node that will not give up
+   * its telemetry module config may still report its LoRa settings -- which
+   * is the half that matters most. The returned outcome says which arrived
+   * so the UI can report a partial read rather than implying the blanks are
+   * settings.
+   */
+  async readRadioConfig(
+    nodeNum: number,
+    signal?: AbortSignal,
+  ): Promise<{ config: NodeRadioConfig; outcome: ConfigReadOutcome }> {
+    const config = emptyRadioConfig(Math.floor(Date.now() / 1000));
+    const outcome: ConfigReadOutcome = {
+      lora: false,
+      device: false,
+      position: false,
+      telemetry: false,
+    };
+
+    const ConfigType = Protobuf.Admin.AdminMessage_ConfigType;
+    const ModuleConfigType = Protobuf.Admin.AdminMessage_ModuleConfigType;
+
+    outcome.lora = await this.readConfigInto(
+      nodeNum, config, ConfigType.LORA_CONFIG, signal,
+    );
+    outcome.device = await this.readConfigInto(
+      nodeNum, config, ConfigType.DEVICE_CONFIG, signal,
+    );
+    outcome.position = await this.readConfigInto(
+      nodeNum, config, ConfigType.POSITION_CONFIG, signal,
+    );
+    outcome.telemetry = await this.readModuleConfigInto(
+      nodeNum, config, ModuleConfigType.TELEMETRY_CONFIG, signal,
+    );
+
+    return { config, outcome };
+  }
+
+  /** One `getConfigRequest`, folded into the snapshot. False if it failed. */
+  private async readConfigInto(
+    nodeNum: number,
+    target: NodeRadioConfig,
+    type: Protobuf.Admin.AdminMessage_ConfigType,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      const response = await this.request(
+        nodeNum,
+        { case: "getConfigRequest", value: type },
+        { withPasskey: false, signal },
+      );
+      if (response.payloadVariant.case !== "getConfigResponse") return false;
+      return applyConfig(target, response.payloadVariant.value);
+    } catch (cause) {
+      // A cancel must abandon the whole sequence rather than be recorded as
+      // "this config type did not answer".
+      if (cause instanceof TaskCancelledError) throw cause;
+      this.options.logger.debug(
+        {
+          nodeNum,
+          type: Protobuf.Admin.AdminMessage_ConfigType[type],
+          err: (cause as Error).message,
+        },
+        "config read failed",
+      );
+      return false;
+    }
+  }
+
+  /** As `readConfigInto`, for `getModuleConfigRequest`. */
+  private async readModuleConfigInto(
+    nodeNum: number,
+    target: NodeRadioConfig,
+    type: Protobuf.Admin.AdminMessage_ModuleConfigType,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      const response = await this.request(
+        nodeNum,
+        { case: "getModuleConfigRequest", value: type },
+        { withPasskey: false, signal },
+      );
+      if (response.payloadVariant.case !== "getModuleConfigResponse") {
+        return false;
+      }
+      return applyModuleConfig(target, response.payloadVariant.value);
+    } catch (cause) {
+      if (cause instanceof TaskCancelledError) throw cause;
+      this.options.logger.debug(
+        {
+          nodeNum,
+          type: Protobuf.Admin.AdminMessage_ModuleConfigType[type],
+          err: (cause as Error).message,
+        },
+        "module config read failed",
+      );
+      return false;
+    }
   }
 
   /** Clears cached state for a node, forcing a fresh passkey next time. */

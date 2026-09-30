@@ -50,6 +50,36 @@ export function metric(
   return `${value.toFixed(digits)}${unit}`;
 }
 
+/**
+ * A configured interval in seconds.
+ *
+ * Three distinct states share this one field, and conflating any two of them
+ * misreports the node:
+ *
+ * - `null` -- we have not read this setting. Not a value.
+ * - `0` -- firmware's "use the built-in default". A real, common setting; a
+ *   node with `deviceUpdateInterval: 0` reports every half hour, so showing
+ *   "0s" or "never" would be simply wrong.
+ * - anything else -- the explicit interval.
+ */
+export function interval(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined) return "—";
+  if (seconds === 0) return "Default";
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3_600) {
+    const minutes = seconds / 60;
+    return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} min`;
+  }
+  const hours = seconds / 3_600;
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} h`;
+}
+
+/** A boolean setting, keeping "not read" distinct from "off". */
+export function flag(value: boolean | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return value ? "Enabled" : "Disabled";
+}
+
 export function uptime(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined) return "—";
   const days = Math.floor(seconds / 86_400);

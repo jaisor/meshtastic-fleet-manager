@@ -3,7 +3,7 @@ import type { FastifyBaseLogger } from "fastify";
 import type { NodeRepository } from "../db/repositories/nodes.js";
 import type { MeshListener } from "./listener.js";
 import { logNode } from "./nodeId.js";
-import { TaskCancelledError } from "./tasks.js";
+import { TaskCancelledError, type RadioTaskRegistry } from "./tasks.js";
 
 /**
  * Asks a newly discovered node to introduce itself.
@@ -37,6 +37,20 @@ const SEND_SPACING_MS = 5_000;
  */
 const MAX_PENDING = 50;
 
+/**
+ * How long to wait before re-checking whether the radio has come free.
+ *
+ * The automatic pass **defers** to anything else using the radio rather than
+ * taking the lock itself. Two reasons for the asymmetry: LoRa is half-duplex,
+ * so transmitting while an admin exchange is waiting for its reply can make us
+ * miss that reply -- and nothing of ours is at risk in the other direction,
+ * since these are one-shot requests with no correlated response to lose. And
+ * holding the lock would be worse than useless here: a discovery burst can
+ * queue fifty nodes, so locking the radio for each in turn would leave the
+ * console refusing an operator's clicks for several minutes.
+ */
+const BUSY_RETRY_MS = 3_000;
+
 /** Gap between the sends of a manual refresh, where someone is waiting. */
 const MANUAL_SPACING_MS = 1_200;
 
@@ -55,6 +69,12 @@ export interface NodeEnricherOptions {
   nodes: NodeRepository;
   logger: FastifyBaseLogger;
   enabled: boolean;
+  /**
+   * The radio lock, consulted but never taken -- see `BUSY_RETRY_MS`. The
+   * manual `refresh` path does not check it, because its caller already holds
+   * it and would be waiting on itself.
+   */
+  tasks: RadioTaskRegistry;
 }
 
 export class NodeEnricher {
@@ -100,6 +120,14 @@ export class NodeEnricher {
 
     try {
       while (this.pending.length > 0 && !this.stopped) {
+        // Somebody else has the radio. Hold the queue rather than dropping
+        // nodes from it: they are newly discovered and nothing else will fill
+        // their details in until their own next broadcast.
+        if (this.options.tasks.isBusy()) {
+          await delay(BUSY_RETRY_MS);
+          continue;
+        }
+
         const nodeNum = this.pending.shift() as number;
         this.queued.delete(nodeNum);
         await this.enrich(nodeNum);

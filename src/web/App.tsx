@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
   DiscoverySummary,
+  RadioOccupancy,
   RadioStatus,
   RadioTask,
   SessionUser,
@@ -32,6 +33,7 @@ export function App() {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [radio, setRadio] = useState<RadioStatus | null>(null);
   const [tasks, setTasks] = useState<RadioTask[]>([]);
+  const [radioBusy, setRadioBusy] = useState<RadioOccupancy | null>(null);
   const [discovery, setDiscovery] = useState<DiscoverySummary | null>(null);
   const [route, navigate] = useRoute();
 
@@ -57,12 +59,16 @@ export function App() {
         if (cancelled) return;
         setRadio(status.radio);
         setTasks(status.tasks);
+        setRadioBusy(status.radioBusy);
         setDiscovery(status.discovery);
         // Reschedule from the response rather than on a fixed interval, so
         // the cadence follows whether the radio is actually busy.
+        // Follows `radioBusy`, not `tasks`: a background sweep disables
+        // controls without appearing in the banner, and leaving those
+        // disabled for 15s after it finished reads as a broken button.
         timer = setTimeout(
           () => void load(),
-          status.tasks.length > 0 ? BUSY_REFRESH_MS : STATUS_REFRESH_MS,
+          status.radioBusy ? BUSY_REFRESH_MS : STATUS_REFRESH_MS,
         );
       } catch (cause) {
         // A 401 here means the session expired underneath us; drop to the
@@ -102,6 +108,7 @@ export function App() {
       setUser(null);
       setRadio(null);
       setTasks([]);
+      setRadioBusy(null);
     }
   }, []);
 
@@ -157,15 +164,20 @@ export function App() {
           <NodeDetail
             nodeId={route.nodeId}
             onBack={() => navigate("/")}
-            // Null until the first status poll lands. Treating "unknown" as
-            // "no radio" keeps the mesh-write controls disabled until we
-            // actually know, rather than offering a button that 503s.
-            // Both must hold: the radio has to be there, and the role has
-            // to be allowed to use it. A viewer sees the same page without
-            // the controls.
-            radioConnected={
-              (radio?.connected ?? false) && canOperateRadio(user.role)
-            }
+            // Deliberately two props, not one conjunction. A viewer and an
+            // operator with an unplugged radio are both "cannot write", but
+            // they need different words for it: the viewer should not be told
+            // to go and check the radio, and hiding a control from an
+            // operator whose radio is merely absent would look like a
+            // permissions problem. The page shows nothing to a viewer and a
+            // disabled control with the real reason to an operator.
+            //
+            // Null until the first status poll lands; treating "unknown" as
+            // "no radio" keeps mesh controls disabled until we actually know,
+            // rather than offering a button that 503s.
+            radioConnected={radio?.connected ?? false}
+            canOperate={canOperateRadio(user.role)}
+            radioBusy={radioBusy}
           />
         ) : (
           <Fleet onOpen={navigate} discovery={discovery} />

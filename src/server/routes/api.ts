@@ -10,7 +10,7 @@ import { describeRules, isRestricted } from "../mesh/discovery.js";
 import { requireCapability, type AuthContext } from "../auth.js";
 import type { NodeEnricher } from "../mesh/enrich.js";
 import { logNode, parseNodeId } from "../mesh/nodeId.js";
-import type { NodeConfigUpdate } from "../../shared/types.js";
+import type { NodeConfigUpdate, RadioOccupancy } from "../../shared/types.js";
 
 /**
  * Read paths serve straight from SQLite -- never from the radio -- so the
@@ -18,6 +18,30 @@ import type { NodeConfigUpdate } from "../../shared/types.js";
  * unplugged. Only the write path in `PATCH /api/nodes/:id/config` touches
  * the mesh, and it reports its own outcome.
  */
+
+/**
+ * The radio is exclusive, so every operation can be refused because another
+ * one holds it. 409 rather than 503: 503 is "there is no radio", this is "the
+ * radio is here and busy", and an operator needs to tell those apart. The
+ * message names the occupant, because "busy" alone leaves nothing to do but
+ * click again.
+ */
+function busyError(occupant: RadioOccupancy | null): { error: string } {
+  if (!occupant) {
+    // It finished between the refusal and this call. Rare, and there is
+    // nothing useful to name, so say the one thing that is certainly true.
+    return { error: "The radio was busy with another operation. Try again." };
+  }
+
+  const what = `${occupant.label.toLowerCase()} on ${occupant.nodeName ?? occupant.nodeId}`;
+  // Background work has no banner entry, so telling someone to cancel it there
+  // would send them looking for a control that does not exist.
+  return {
+    error: occupant.background
+      ? `The radio is busy in the background: ${what}. This clears on its own in a few seconds — try again shortly.`
+      : `The radio is busy: ${what}. Wait for it to finish, or cancel it from the banner at the top of the page.`,
+  };
+}
 
 const TELEMETRY_LIMIT = 200;
 const POSITION_LIMIT = 100;
@@ -49,6 +73,10 @@ export function registerApiRoutes(
     // Polled by the UI to drive the "radio busy" banner, so this endpoint
     // is also what makes a long operation visible from any page.
     tasks: deps.tasks.list(),
+    // Separate from `tasks` on purpose: this one includes background sweeps,
+    // so the UI can disable a control the server would refuse even though
+    // nothing is in the banner.
+    radioBusy: deps.tasks.occupancy(),
     discovery: {
       restricted: isRestricted(deps.config.discoveryRules),
       description: describeRules(deps.config.discoveryRules),
@@ -100,7 +128,93 @@ export function registerApiRoutes(
         telemetry: deps.nodes.telemetryFor(nodeNum, TELEMETRY_LIMIT),
         positions: deps.nodes.positionsFor(nodeNum, POSITION_LIMIT),
         operations: deps.operations.recentFor(nodeNum, OPERATION_LIMIT),
+        config: deps.nodes.configFor(nodeNum),
       };
+    },
+  );
+
+  /**
+   * Reads a remote node's radio and module settings over the mesh.
+   *
+   * On demand rather than swept, because unlike the admin probe this is four
+   * round trips and nothing about it expires -- settings change when someone
+   * changes them, not on a schedule. Polling the fleet for config would spend
+   * most of the duty cycle re-learning constants.
+   *
+   * The local radio needs none of this: its own dump arrives over USB on
+   * every connect, so its row is already there and this refuses rather than
+   * sending an admin message to ourselves.
+   */
+  app.post<{ Params: { id: string } }>(
+    "/api/nodes/:id/config/read",
+    async (request, reply) => {
+      if (!(await requireOperator(request, reply))) return reply;
+
+      const nodeNum = parseNodeId(request.params.id);
+      if (nodeNum === null) {
+        return reply.status(400).send({ error: "malformed node id" });
+      }
+      const node = deps.nodes.get(nodeNum);
+      if (!node) return reply.status(404).send({ error: "unknown node" });
+      if (node.isLocal) {
+        return reply.status(400).send({
+          error: "the local node reports its own settings over USB",
+        });
+      }
+      if (!deps.listener.getDevice()) {
+        return reply.status(503).send({ error: "local radio is not connected" });
+      }
+
+      const started = deps.tasks.start({
+        kind: "readConfig",
+        label: "Reading radio settings",
+        nodeNum,
+        nodeName: node.longName ?? node.shortName ?? null,
+        // Four sequential reads, each able to run out its own admin timeout.
+        timeoutSeconds: deps.config.fleet.admin_probe_timeout * 4,
+      });
+
+      if (!started) {
+        return reply.status(409).send(busyError(deps.tasks.occupancy()));
+      }
+      const { task, signal } = started;
+
+      try {
+        const { config, outcome } = await deps.admin.readRadioConfig(
+          nodeNum,
+          signal,
+        );
+
+        // Nothing came back at all: leave any previous snapshot alone rather
+        // than replacing it with a row of blanks stamped with now.
+        if (!outcome.lora && !outcome.device && !outcome.position && !outcome.telemetry) {
+          return reply.status(502).send({
+            error: "the node did not answer any settings request",
+            outcome,
+          });
+        }
+
+        deps.nodes.saveConfig(nodeNum, config);
+        // Answering an admin read is proof of admin rights, so record it --
+        // otherwise the badge can still read "unprobed" next to settings that
+        // could only have been obtained with those rights.
+        deps.nodes.setAdminCapability(nodeNum, "capable");
+        request.log.info({ ...logNode(nodeNum), outcome }, "radio settings read");
+        return { outcome, config };
+      } catch (cause) {
+        if (cause instanceof TaskCancelledError) {
+          return reply.status(409).send({ error: "settings read cancelled" });
+        }
+        if (cause instanceof AdminError) {
+          if (cause.capability !== "unknown") {
+            deps.nodes.setAdminCapability(nodeNum, cause.capability);
+          }
+          return reply.status(502).send({ error: cause.message });
+        }
+        throw cause;
+      } finally {
+        deps.tasks.finish(task.id);
+      }
     },
   );
 
@@ -124,15 +238,24 @@ export function registerApiRoutes(
         return reply.status(503).send({ error: "local radio is not connected" });
       }
 
-      deps.admin.forget(nodeNum);
       const node = deps.nodes.get(nodeNum);
-      const { task, signal } = deps.tasks.start({
+      const started = deps.tasks.start({
         kind: "probe",
         label: "Checking admin access",
         nodeNum,
         nodeName: node?.longName ?? node?.shortName ?? null,
         timeoutSeconds: deps.config.fleet.admin_probe_timeout,
       });
+
+      if (!started) {
+        return reply.status(409).send(busyError(deps.tasks.occupancy()));
+      }
+      const { task, signal } = started;
+
+      // Drop the cached session passkey so the probe is a real round trip and
+      // not a verdict inferred from state left over from last time. After the
+      // lock, not before: a refused request must change nothing.
+      deps.admin.forget(nodeNum);
 
       try {
         const capability = await deps.admin.probe(nodeNum, signal);
@@ -180,13 +303,18 @@ export function registerApiRoutes(
         return reply.status(503).send({ error: "local radio is not connected" });
       }
 
-      const { task, signal } = deps.tasks.start({
+      const started = deps.tasks.start({
         kind: "refresh",
         label: "Refreshing device information",
         nodeNum,
         nodeName: node.longName ?? node.shortName ?? null,
         timeoutSeconds: 25,
       });
+
+      if (!started) {
+        return reply.status(409).send(busyError(deps.tasks.occupancy()));
+      }
+      const { task, signal } = started;
 
       try {
         const received = await deps.enricher.refresh(nodeNum, signal);
@@ -236,13 +364,18 @@ export function registerApiRoutes(
         .map(([key, value]) => `${key}=${value}`)
         .join(", ");
       const operationId = deps.operations.create(nodeNum, "setOwner", detail);
-      const { task, signal } = deps.tasks.start({
+      const started = deps.tasks.start({
         kind: "config",
         label: "Applying configuration",
         nodeNum,
         nodeName: node.longName ?? node.shortName ?? null,
         timeoutSeconds: deps.config.fleet.admin_probe_timeout,
       });
+
+      if (!started) {
+        return reply.status(409).send(busyError(deps.tasks.occupancy()));
+      }
+      const { task, signal } = started;
 
       try {
         await deps.admin.setOwner(nodeNum, update.value, signal);

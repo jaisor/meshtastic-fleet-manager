@@ -1,4 +1,8 @@
-import type { RadioTask, RadioTaskKind } from "../../shared/types.js";
+import type {
+  RadioOccupancy,
+  RadioTask,
+  RadioTaskKind,
+} from "../../shared/types.js";
 import { toNodeId } from "./nodeId.js";
 
 /**
@@ -9,9 +13,21 @@ import { toNodeId } from "./nodeId.js";
  * somewhere else since. The registry exists so the UI can say what the
  * radio is busy with from any page, and offer a way out of it.
  *
- * Background work -- the capability prober's sweeps -- is deliberately not
- * registered. It is not something a person is waiting on, and a banner
- * that appeared on its own schedule would train people to ignore banners.
+ * **The radio is exclusive: one operation at a time.** There is one LoRa
+ * transceiver and a duty cycle shared with the whole mesh, so two admin
+ * exchanges in flight together contend for airtime, stretch each other's
+ * timeouts, and make a slow link look like a broken one. `start` refuses
+ * rather than queueing: a queue would leave someone watching a button that
+ * did nothing for a minute, and the honest answer -- "the radio is busy
+ * doing X" -- is more useful than a silent wait.
+ *
+ * Background work -- the capability prober's sweeps -- still takes the lock,
+ * because colliding with a sweep is just as bad as colliding with a person.
+ * It is **not** listed by `list()`, so it never reaches the task banner: it
+ * is not something anyone is waiting on, and a banner appearing on its own
+ * schedule would train people to ignore banners. It does show up in
+ * `occupancy()`, which is what the UI uses to explain a disabled button --
+ * otherwise the buttons would look available and the server would refuse.
  */
 
 export interface StartTaskInput {
@@ -20,6 +36,11 @@ export interface StartTaskInput {
   nodeNum: number;
   nodeName: string | null;
   timeoutSeconds: number;
+  /**
+   * Work nobody is waiting on. Takes the lock like anything else, but stays
+   * out of `list()` and so out of the task banner.
+   */
+  background?: boolean;
 }
 
 export interface StartedTask {
@@ -39,11 +60,22 @@ export class TaskCancelledError extends Error {
 export class RadioTaskRegistry {
   private readonly entries = new Map<
     number,
-    { task: RadioTask; controller: AbortController }
+    { task: RadioTask; controller: AbortController; background: boolean }
   >();
   private nextId = 1;
 
-  start(input: StartTaskInput): StartedTask {
+  /**
+   * Takes the radio, or returns null because something else already has it.
+   *
+   * Callers must handle null -- for an HTTP route that means 409 naming the
+   * occupant, never an exception, because "busy" is an ordinary outcome and
+   * not a fault. The check and the insert happen together in one synchronous
+   * block, which is what makes this a lock at all: Node runs one thing at a
+   * time, so no two requests can both observe it free.
+   */
+  start(input: StartTaskInput): StartedTask | null {
+    if (this.entries.size > 0) return null;
+
     const controller = new AbortController();
     const task: RadioTask = {
       id: this.nextId++,
@@ -55,8 +87,36 @@ export class RadioTaskRegistry {
       startedAt: Math.floor(Date.now() / 1000),
       timeoutSeconds: input.timeoutSeconds,
     };
-    this.entries.set(task.id, { task, controller });
+    this.entries.set(task.id, {
+      task,
+      controller,
+      background: input.background === true,
+    });
     return { task, signal: controller.signal };
+  }
+
+  /** True while anything holds the radio, background work included. */
+  isBusy(): boolean {
+    return this.entries.size > 0;
+  }
+
+  /**
+   * What the radio is doing, for explaining a disabled control.
+   *
+   * Reports background work too, unlike `list()`. A button that looks
+   * available while the server would refuse it is the exact failure this
+   * exists to prevent.
+   */
+  occupancy(): RadioOccupancy | null {
+    const entry = [...this.entries.values()][0];
+    if (!entry) return null;
+    return {
+      label: entry.task.label,
+      nodeId: entry.task.nodeId,
+      nodeName: entry.task.nodeName,
+      background: entry.background,
+      startedAt: entry.task.startedAt,
+    };
   }
 
   /** Always call this, cancelled or not, or the banner never goes away. */
@@ -76,8 +136,10 @@ export class RadioTaskRegistry {
     return true;
   }
 
+  /** User-initiated work only; background work is deliberately excluded. */
   list(): RadioTask[] {
     return [...this.entries.values()]
+      .filter((entry) => !entry.background)
       .map((entry) => entry.task)
       .toSorted((a, b) => a.startedAt - b.startedAt || a.id - b.id);
   }

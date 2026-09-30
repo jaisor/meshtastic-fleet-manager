@@ -210,7 +210,45 @@ export class MeshListener extends EventEmitter {
     device.events.onMessagePacket.subscribe((p) => this.emit("message", p));
     device.events.onDeviceMetadataPacket.subscribe((p) => this.emit("metadata", p));
     device.events.onRoutingPacket.subscribe((p) => this.emit("routing", p));
-    device.events.onMeshPacket.subscribe((p) => this.emit("meshPacket", p));
+
+    /**
+     * True only while a decoded MeshPacket is being dispatched.
+     *
+     * `onConfigPacket` and `onModuleConfigPacket` have **two** dispatch sites
+     * in the library and carry no node number: `handleFromRadio` emits them
+     * for the local radio's own config dump during `configure()`, and
+     * `handleDecodedPacket` emits them again for a *remote* node's
+     * `getConfigResponse`. Subscribing naively would file a remote node's
+     * LoRa preset as the local radio's, silently, and the local node is
+     * exactly the one whose values look plausible enough not to be
+     * questioned.
+     *
+     * The two are distinguishable by origin: an admin response always
+     * arrives inside a MeshPacket dispatch, the local dump never does.
+     * `handleMeshPacket` dispatches `onMeshPacket` first and then calls
+     * `handleDecodedPacket` on the same synchronous call stack, so a flag set
+     * here and cleared in a microtask is true for exactly that window.
+     * Remote reads are the `AdminClient`'s business anyway -- it correlates
+     * them by `requestId`, which is authoritative -- so they are dropped
+     * here rather than guessed at.
+     */
+    let inMeshPacket = false;
+    device.events.onMeshPacket.subscribe((p) => {
+      inMeshPacket = true;
+      queueMicrotask(() => {
+        inMeshPacket = false;
+      });
+      this.emit("meshPacket", p);
+    });
+
+    device.events.onConfigPacket.subscribe((config) => {
+      if (inMeshPacket) return;
+      this.emit("localConfig", config);
+    });
+    device.events.onModuleConfigPacket.subscribe((config) => {
+      if (inMeshPacket) return;
+      this.emit("localModuleConfig", config);
+    });
   }
 }
 

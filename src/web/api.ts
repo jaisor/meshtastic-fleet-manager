@@ -2,12 +2,15 @@ import type { UserRole } from "../shared/roles";
 import type {
   AdminCapability,
   AdminOperation,
+  ConfigReadOutcome,
   FleetNode,
   NodeConfigUpdate,
+  NodeRadioConfig,
   PositionPoint,
   DiscoverySummary,
   ManagedUser,
   MaintenanceResult,
+  RadioOccupancy,
   RadioStatus,
   SessionResponse,
   RadioTask,
@@ -60,6 +63,11 @@ export interface StatusResponse {
   staleAfter: number;
   /** User-initiated operations currently occupying the radio. */
   tasks: RadioTask[];
+  /**
+   * What holds the radio, background sweeps included — so a control can be
+   * disabled for work that never appears in the task banner.
+   */
+  radioBusy: RadioOccupancy | null;
   discovery: DiscoverySummary;
 }
 
@@ -68,6 +76,8 @@ export interface NodeDetailResponse {
   telemetry: TelemetryPoint[];
   positions: PositionPoint[];
   operations: AdminOperation[];
+  /** Null until somebody reads this node's settings. */
+  config: NodeRadioConfig | null;
 }
 
 export const api = {
@@ -127,6 +137,13 @@ export const api = {
   probeNode: (nodeId: string) =>
     request<{ capability: AdminCapability }>(
       `/api/nodes/${encodeURIComponent(nodeId)}/probe`,
+      { method: "POST" },
+    ),
+
+  /** Four mesh round trips; slow by nature. Registers a cancellable task. */
+  readNodeConfig: (nodeId: string) =>
+    request<{ outcome: ConfigReadOutcome; config: NodeRadioConfig }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/config/read`,
       { method: "POST" },
     ),
 

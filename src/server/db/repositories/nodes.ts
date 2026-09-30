@@ -2,6 +2,7 @@ import type { Db } from "../index.js";
 import type {
   AdminCapability,
   FleetNode,
+  NodeRadioConfig,
   NodeState,
   PositionPoint,
   SignalQuality,
@@ -26,6 +27,73 @@ interface NodeRow {
   voltage: number | null;
   admin_capability: string;
   admin_checked_at: number | null;
+}
+
+/** `node_config` as SQLite hands it back: booleans are 0/1 or null. */
+interface NodeConfigRow {
+  fetched_at: number;
+  region: string | null;
+  modem_preset: string | null;
+  uses_preset: number | null;
+  bandwidth: number | null;
+  spread_factor: number | null;
+  coding_rate: number | null;
+  frequency_slot: number | null;
+  hop_limit: number | null;
+  tx_power: number | null;
+  tx_enabled: number | null;
+  node_info_interval: number | null;
+  position_interval: number | null;
+  gps_update_interval: number | null;
+  device_metrics_interval: number | null;
+  environment_interval: number | null;
+  environment_enabled: number | null;
+  air_quality_interval: number | null;
+  air_quality_enabled: number | null;
+  power_interval: number | null;
+  power_enabled: number | null;
+  health_interval: number | null;
+  health_enabled: number | null;
+}
+
+/**
+ * SQLite has no boolean type. These round-trip through 0/1 while preserving
+ * null, which here means "not read" and must not collapse into `false`.
+ */
+function asInt(value: boolean | null | undefined): number | null {
+  return value === null || value === undefined ? null : value ? 1 : 0;
+}
+
+function asBool(value: number | null): boolean | null {
+  return value === null ? null : value === 1;
+}
+
+function toRadioConfig(row: NodeConfigRow): NodeRadioConfig {
+  return {
+    fetchedAt: row.fetched_at,
+    region: row.region,
+    modemPreset: row.modem_preset,
+    usesPreset: asBool(row.uses_preset),
+    bandwidth: row.bandwidth,
+    spreadFactor: row.spread_factor,
+    codingRate: row.coding_rate,
+    frequencySlot: row.frequency_slot,
+    hopLimit: row.hop_limit,
+    txPower: row.tx_power,
+    txEnabled: asBool(row.tx_enabled),
+    nodeInfoInterval: row.node_info_interval,
+    positionInterval: row.position_interval,
+    gpsUpdateInterval: row.gps_update_interval,
+    deviceMetricsInterval: row.device_metrics_interval,
+    environmentInterval: row.environment_interval,
+    environmentEnabled: asBool(row.environment_enabled),
+    airQualityInterval: row.air_quality_interval,
+    airQualityEnabled: asBool(row.air_quality_enabled),
+    powerInterval: row.power_interval,
+    powerEnabled: asBool(row.power_enabled),
+    healthInterval: row.health_interval,
+    healthEnabled: asBool(row.health_enabled),
+  };
 }
 
 /** Fields an ingest may set. Undefined means "leave whatever we had". */
@@ -280,6 +348,99 @@ export class NodeRepository {
          ORDER BY recorded_at DESC LIMIT ?`,
       )
       .all(nodeNum, limit);
+  }
+
+  /**
+   * Replaces a node's settings snapshot wholesale.
+   *
+   * A whole-row replace rather than a field-wise merge, because the
+   * snapshot's `fetchedAt` has to mean something: merging a fresh LoRa read
+   * over month-old telemetry intervals would produce a row that never
+   * existed on any node, stamped with today's date. A read that only
+   * partially answered therefore leaves the fields it could not get null,
+   * and the UI says which.
+   */
+  saveConfig(nodeNum: number, config: NodeRadioConfig): void {
+    this.db
+      .prepare(
+        `INSERT INTO node_config (
+           node_num, fetched_at, region, modem_preset, uses_preset, bandwidth,
+           spread_factor, coding_rate, frequency_slot, hop_limit, tx_power,
+           tx_enabled, node_info_interval, position_interval,
+           gps_update_interval, device_metrics_interval,
+           environment_interval, environment_enabled, air_quality_interval,
+           air_quality_enabled, power_interval, power_enabled, health_interval,
+           health_enabled
+         ) VALUES (
+           @nodeNum, @fetchedAt, @region, @modemPreset, @usesPreset, @bandwidth,
+           @spreadFactor, @codingRate, @frequencySlot, @hopLimit, @txPower,
+           @txEnabled, @nodeInfoInterval, @positionInterval,
+           @gpsUpdateInterval, @deviceMetricsInterval,
+           @environmentInterval, @environmentEnabled, @airQualityInterval,
+           @airQualityEnabled, @powerInterval, @powerEnabled, @healthInterval,
+           @healthEnabled
+         )
+         ON CONFLICT(node_num) DO UPDATE SET
+           fetched_at = excluded.fetched_at,
+           region = excluded.region,
+           modem_preset = excluded.modem_preset,
+           uses_preset = excluded.uses_preset,
+           bandwidth = excluded.bandwidth,
+           spread_factor = excluded.spread_factor,
+           coding_rate = excluded.coding_rate,
+           frequency_slot = excluded.frequency_slot,
+           hop_limit = excluded.hop_limit,
+           tx_power = excluded.tx_power,
+           tx_enabled = excluded.tx_enabled,
+           node_info_interval = excluded.node_info_interval,
+           position_interval = excluded.position_interval,
+           gps_update_interval = excluded.gps_update_interval,
+           device_metrics_interval = excluded.device_metrics_interval,
+           environment_interval = excluded.environment_interval,
+           environment_enabled = excluded.environment_enabled,
+           air_quality_interval = excluded.air_quality_interval,
+           air_quality_enabled = excluded.air_quality_enabled,
+           power_interval = excluded.power_interval,
+           power_enabled = excluded.power_enabled,
+           health_interval = excluded.health_interval,
+           health_enabled = excluded.health_enabled`,
+      )
+      .run({
+        nodeNum,
+        fetchedAt: config.fetchedAt,
+        region: config.region,
+        modemPreset: config.modemPreset,
+        usesPreset: asInt(config.usesPreset),
+        bandwidth: config.bandwidth,
+        spreadFactor: config.spreadFactor,
+        codingRate: config.codingRate,
+        frequencySlot: config.frequencySlot,
+        hopLimit: config.hopLimit,
+        txPower: config.txPower,
+        txEnabled: asInt(config.txEnabled),
+        nodeInfoInterval: config.nodeInfoInterval,
+        positionInterval: config.positionInterval,
+        gpsUpdateInterval: config.gpsUpdateInterval,
+        deviceMetricsInterval: config.deviceMetricsInterval,
+        environmentInterval: config.environmentInterval,
+        environmentEnabled: asInt(config.environmentEnabled),
+        airQualityInterval: config.airQualityInterval,
+        airQualityEnabled: asInt(config.airQualityEnabled),
+        powerInterval: config.powerInterval,
+        powerEnabled: asInt(config.powerEnabled),
+        healthInterval: config.healthInterval,
+        healthEnabled: asInt(config.healthEnabled),
+      });
+  }
+
+  /** The stored settings snapshot, or null when nobody has read them. */
+  configFor(nodeNum: number): NodeRadioConfig | null {
+    const row = this.db
+      .prepare<[number], NodeConfigRow>(
+        "SELECT * FROM node_config WHERE node_num = ?",
+      )
+      .get(nodeNum);
+    return row ? toRadioConfig(row) : null;
   }
 
   /** Drops history older than `retention` seconds. Node rows are kept. */
