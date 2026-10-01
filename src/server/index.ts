@@ -7,6 +7,7 @@ import fastifyStatic from "@fastify/static";
 import { ConfigError, loadConfig } from "./config.js";
 import { openDatabase } from "./db/index.js";
 import { NodeRepository } from "./db/repositories/nodes.js";
+import { ChannelRepository } from "./db/repositories/channels.js";
 import { AdminOperationRepository } from "./db/repositories/adminOperations.js";
 import { MeshListener } from "./mesh/listener.js";
 import { attachIngest } from "./mesh/ingest.js";
@@ -18,6 +19,7 @@ import { RadioWatchdog } from "./mesh/watchdog.js";
 import { registerAuthRoutes, requireSession, SessionStore } from "./auth.js";
 import { UserRepository } from "./db/repositories/users.js";
 import { registerApiRoutes } from "./routes/api.js";
+import { registerRadioRoutes } from "./routes/radio.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -70,6 +72,7 @@ async function main(): Promise<void> {
   });
   const operations = new AdminOperationRepository(db);
   const users = new UserRepository(db);
+  const channels = new ChannelRepository(db);
 
   // Anything still pending belongs to a previous process and has no waiter.
   const abandoned = operations.failAllPending("interrupted by server restart");
@@ -97,7 +100,7 @@ async function main(): Promise<void> {
     enabled: config.discovery.probe_new_nodes,
   });
 
-  attachIngest(listener, nodes, config.discoveryRules, app.log, (nodeNum) =>
+  attachIngest(listener, nodes, channels, config.discoveryRules, app.log, (nodeNum) =>
     enricher.enqueue(nodeNum),
   );
 
@@ -158,7 +161,7 @@ async function main(): Promise<void> {
   // unauthenticated by forgetting a decorator.
   await app.register(async (scope) => {
     scope.addHook("onRequest", requireSession(auth));
-    registerApiRoutes(scope, {
+    const apiDeps = {
       config,
       nodes,
       operations,
@@ -169,7 +172,9 @@ async function main(): Promise<void> {
       auth,
       enricher,
       watchdog,
-    });
+    };
+    registerApiRoutes(scope, apiDeps);
+    registerRadioRoutes(scope, { ...apiDeps, channels });
     registerAdminRoutes(scope, { auth, users, db });
   });
 

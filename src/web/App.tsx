@@ -15,6 +15,7 @@ import { Admin } from "./pages/Admin";
 import { Fleet } from "./pages/Fleet";
 import { Login } from "./pages/Login";
 import { NodeDetail } from "./pages/NodeDetail";
+import { Radio } from "./pages/Radio";
 
 /** How often the radio pill refreshes when nothing is happening. */
 const STATUS_REFRESH_MS = 15_000;
@@ -100,6 +101,11 @@ export function App() {
     }
   }, []);
 
+  const openRadio = useCallback(
+    () => navigate("/radio", { replace: true }),
+    [navigate],
+  );
+
   const logout = useCallback(async () => {
     try {
       await api.logout();
@@ -160,6 +166,13 @@ export function App() {
           ) : (
             <NotPermitted role={user.role} onBack={() => navigate("/")} />
           )
+        ) : route.name === "radio" ? (
+          <Radio
+            onBack={() => navigate("/")}
+            radioConnected={radio?.connected ?? false}
+            canAdminister={canAdminister(user.role)}
+            radioBusy={radioBusy}
+          />
         ) : route.name === "node" ? (
           <NodeDetail
             nodeId={route.nodeId}
@@ -178,6 +191,7 @@ export function App() {
             radioConnected={radio?.connected ?? false}
             canOperate={canOperateRadio(user.role)}
             radioBusy={radioBusy}
+            onLocal={openRadio}
           />
         ) : (
           <Fleet onOpen={navigate} discovery={discovery} />

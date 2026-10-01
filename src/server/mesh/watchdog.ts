@@ -1,8 +1,8 @@
-import { randomInt } from "node:crypto";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { create, fromBinary } from "@bufbuild/protobuf";
 import { type MeshDevice, Protobuf } from "@meshtastic/core";
 import type { FastifyBaseLogger } from "fastify";
 import type { RadioWatchdogStatus } from "../../shared/types.js";
+import { buildAdminToRadio, newPacketId } from "./admin.js";
 import type { MeshListener } from "./listener.js";
 import { logNode, toNodeId } from "./nodeId.js";
 
@@ -247,29 +247,17 @@ export class RadioWatchdog {
    * not sit there for 60s and log a timeout for a check that succeeded.
    */
   private ask(device: MeshDevice, local: number): Promise<Protobuf.Mesh.MeshPacket> {
-    const id = randomInt(1, 0xffffffff);
-    const request = create(Protobuf.Admin.AdminMessageSchema, {
-      payloadVariant: { case: "getDeviceMetadataRequest", value: true },
-    });
-    const packet = create(Protobuf.Mesh.MeshPacketSchema, {
+    const id = newPacketId();
+    const bytes = buildAdminToRadio({
       from: local,
       to: local,
       id,
       // Nothing crosses the air, so there is nothing to acknowledge; the
       // reply is the proof.
       wantAck: false,
-      channel: 0,
-      payloadVariant: {
-        case: "decoded",
-        value: {
-          portnum: ADMIN_PORT,
-          payload: toBinary(Protobuf.Admin.AdminMessageSchema, request),
-          wantResponse: true,
-        },
-      },
-    });
-    const toRadio = create(Protobuf.Mesh.ToRadioSchema, {
-      payloadVariant: { case: "packet", value: packet },
+      message: create(Protobuf.Admin.AdminMessageSchema, {
+        payloadVariant: { case: "getDeviceMetadataRequest", value: true },
+      }),
     });
 
     return new Promise((resolve, reject) => {
@@ -286,7 +274,7 @@ export class RadioWatchdog {
         resolve(reply);
       });
 
-      device.sendRaw(toBinary(Protobuf.Mesh.ToRadioSchema, toRadio), id).catch(
+      device.sendRaw(bytes, id).catch(
         (cause: unknown) => {
           // Settled already -- answered or timed out -- and the queue's own
           // verdict on a packet it was told about late is noise.

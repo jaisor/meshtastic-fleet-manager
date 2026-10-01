@@ -1,28 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  ArrowLeft,
-  Check,
-  Pencil,
-  RefreshCw,
-  RotateCw,
-  Settings2,
-  X,
-} from "lucide-react";
+import { ArrowLeft, RefreshCw, RotateCw } from "lucide-react";
 import { api, ApiError, type NodeDetailResponse } from "../api";
 import type {
   AdminCapability,
   NodeConfigUpdate,
-  NodeRadioConfig,
   RadioOccupancy,
 } from "../../shared/types";
 import { CapabilityBadge } from "../components/CapabilityBadge";
+import { RadioSettings } from "../components/RadioSettings";
+import {
+  EditableField,
+  Field,
+  MAX_LONG_NAME,
+  MAX_SHORT_NAME,
+  OperationLog,
+  PublicKey,
+  describeOccupancy,
+  TelemetryHistory,
+} from "../components/NodeFields";
 import { SignalDot } from "../components/SignalDot";
 import { StatusDot } from "../components/StatusDot";
 import {
   absoluteTime,
-  flag,
   humanizeEnum,
-  interval,
   metric,
   relativeTime,
   uptime,
@@ -34,9 +34,15 @@ export function NodeDetail({
   radioConnected,
   canOperate,
   radioBusy,
+  onLocal,
 }: {
   nodeId: string;
   onBack: () => void;
+  /**
+   * Called when the id turns out to be the local radio, which has its own
+   * page. Old bookmarks and links from before it moved still land here.
+   */
+  onLocal: () => void;
   /** False disables everything that would have to go out over the mesh. */
   radioConnected: boolean;
   /**
@@ -57,6 +63,11 @@ export function NodeDetail({
 }) {
   const [detail, setDetail] = useState<NodeDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const isLocal = detail?.node.isLocal === true;
+  useEffect(() => {
+    if (isLocal) onLocal();
+  }, [isLocal, onLocal]);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
   /**
@@ -135,8 +146,13 @@ export function NodeDetail({
    * and imply it had been applied.
    */
   async function saveNames(update: NodeConfigUpdate): Promise<void> {
-    await runExclusive(() => api.updateNodeConfig(nodeId, update));
-    await load();
+    try {
+      await runExclusive(() => api.updateNodeConfig(nodeId, update));
+    } finally {
+      // After a failure too: the operation log gains a row either way, and a
+      // read-back may have learned the node's real name.
+      await load();
+    }
   }
 
   if (error) return <p className="card p-6 text-red-400">{error}</p>;
@@ -284,6 +300,8 @@ export function NodeDetail({
             {node.batteryLevel === null ? "—" : `${node.batteryLevel}%`}
           </Field>
         </dl>
+
+        <PublicKey value={detail.publicKey} isLocal={node.isLocal} />
       </header>
 
       <RadioSettings
@@ -375,513 +393,7 @@ export function NodeDetail({
   );
 }
 
-function Field({
-  label,
-  children,
-  title,
-  mono,
-}: {
-  label: string;
-  children: React.ReactNode;
-  title?: string;
-  mono?: boolean;
-}) {
-  return (
-    <div>
-      <dt className="text-xs tracking-wide text-neutral-500 uppercase">
-        {label}
-      </dt>
-      <dd
-        title={title}
-        className={`mt-1 text-sm text-neutral-200 ${mono ? "data" : ""}`}
-      >
-        {children}
-      </dd>
-    </div>
-  );
-}
-
 /** Firmware truncates over-long names silently; the server rejects instead. */
-const MAX_LONG_NAME = 39;
-const MAX_SHORT_NAME = 4;
-
-/**
- * A field that flips to an input when its pencil is clicked.
- *
- * Every save here is a mesh round trip to another device, not a form post, so
- * the editor stays open until the remote confirms. On failure it keeps the
- * typed value and shows why: closing the editor and restoring the old name
- * would both lose the edit and imply the change had gone through, and with
- * remote writes "it may or may not have been applied" is a state the operator
- * has to be able to see.
- */
-function EditableField({
-  label,
-  value,
-  mono,
-  maxLength,
-  canEdit,
-  disabledReason,
-  onSave,
-}: {
-  label: string;
-  value: string | null;
-  mono?: boolean;
-  maxLength: number;
-  /** False renders a plain field with no affordance at all. */
-  canEdit: boolean;
-  /**
-   * Non-null shows the pencil but disabled, with this as the reason — no
-   * radio, or the radio busy with something else. An editor already open
-   * stays open; only its save button goes dead, so a half-typed name is not
-   * thrown away because a background sweep started.
-   */
-  disabledReason: string | null;
-  onSave: (next: string) => Promise<void>;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
-
-  // Seeded on open rather than synced from props. The page reloads after every
-  // save and the status poll runs on its own schedule, so a value arriving
-  // mid-edit would otherwise overwrite what someone is in the middle of typing.
-  function open() {
-    setDraft(value ?? "");
-    setFailure(null);
-    setEditing(true);
-  }
-
-  async function commit() {
-    const next = draft.trim();
-    if (next === (value ?? "")) {
-      setEditing(false);
-      return;
-    }
-    setBusy(true);
-    setFailure(null);
-    try {
-      await onSave(next);
-      setEditing(false);
-    } catch (cause) {
-      setFailure(
-        cause instanceof ApiError ? cause.message : "the change did not go through",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (!editing) {
-    return (
-      <div>
-        <dt className="text-xs tracking-wide text-neutral-500 uppercase">
-          {label}
-        </dt>
-        <dd
-          className={`mt-1 flex items-center gap-1.5 text-sm text-neutral-200 ${mono ? "data" : ""}`}
-        >
-          <span className="truncate">{value ?? "—"}</span>
-          {canEdit && (
-            <button
-              type="button"
-              onClick={open}
-              disabled={disabledReason !== null}
-              title={disabledReason ?? `Edit ${label.toLowerCase()} on the node`}
-              className="shrink-0 rounded p-0.5 text-neutral-600 transition hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-neutral-600"
-            >
-              <Pencil aria-hidden className="h-3.5 w-3.5" />
-              <span className="sr-only">Edit {label.toLowerCase()}</span>
-            </button>
-          )}
-        </dd>
-        {failure && <p className="mt-1 text-xs text-red-400">{failure}</p>}
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <dt className="text-xs tracking-wide text-neutral-500 uppercase">
-        {label}
-      </dt>
-      <dd className="mt-1 flex items-center gap-1">
-        <input
-          autoFocus
-          value={draft}
-          maxLength={maxLength}
-          disabled={busy}
-          aria-label={label}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            // Enter must respect the same gate as the button, or the keyboard
-            // path would sail straight past it into a 409.
-            if (event.key === "Enter" && disabledReason === null) void commit();
-            if (event.key === "Escape") setEditing(false);
-          }}
-          className={`w-full min-w-0 rounded border border-neutral-700 bg-neutral-950/80 px-2 py-1 text-sm text-neutral-100 [corner-shape:bevel] focus:border-amber-500/60 focus:outline-none disabled:text-neutral-500 ${mono ? "data" : ""}`}
-        />
-        <button
-          type="button"
-          onClick={() => void commit()}
-          disabled={busy || disabledReason !== null}
-          title={disabledReason ?? "Send this change to the node over the mesh"}
-          className="shrink-0 rounded p-1 text-emerald-400 transition hover:text-emerald-300 disabled:opacity-40"
-        >
-          <Check aria-hidden className="h-4 w-4" />
-          <span className="sr-only">Save {label.toLowerCase()}</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setEditing(false)}
-          disabled={busy}
-          title="Discard"
-          className="shrink-0 rounded p-1 text-neutral-500 transition hover:text-neutral-300 disabled:opacity-40"
-        >
-          <X aria-hidden className="h-4 w-4" />
-          <span className="sr-only">Cancel</span>
-        </button>
-      </dd>
-      <p className="mt-1 text-xs text-neutral-500">
-        {busy
-          ? "Sending over the mesh…"
-          : (disabledReason ?? "Enter to send, Escape to discard.")}
-      </p>
-      {failure && <p className="mt-1 text-xs text-red-400">{failure}</p>}
-    </div>
-  );
-}
-
-/**
- * The node's radio and module settings.
- *
- * None of this arrives on its own -- nothing on the mesh broadcasts a LoRa
- * preset or a telemetry interval. The local radio's values come free with its
- * config dump over USB; a remote node's take four admin round trips, so they
- * are read on request and then cached until someone asks again.
- *
- * Read-only on purpose. Changing a remote node's preset, frequency slot or
- * region is the one class of write that cannot be undone from here: the node
- * applies it, leaves the channel this console can reach, and is then beyond
- * recall without physical access. The intervals are harmless by comparison and
- * are the sensible place to widen writes first.
- */
-function RadioSettings({
-  config,
-  nodeId,
-  isLocal,
-  canOperate,
-  adminCapability,
-  blockedReason,
-  runExclusive,
-  onRead,
-}: {
-  config: NodeRadioConfig | null;
-  nodeId: string;
-  isLocal: boolean;
-  canOperate: boolean;
-  /**
-   * Reading settings is itself an admin read, so it needs the same confirmed
-   * verdict a rename does — and rather more urgently: this is four round
-   * trips, so on a node that will not answer it burns four timeouts before
-   * reporting nothing at all.
-   */
-  adminCapability: AdminCapability;
-  /** Why the radio cannot be used right now, or null. */
-  blockedReason: string | null;
-  runExclusive: <T>(call: () => Promise<T>) => Promise<T>;
-  onRead: () => void;
-}) {
-  const [reading, setReading] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-
-  async function read() {
-    setReading(true);
-    setNote(null);
-    try {
-      const { outcome } = await runExclusive(() => api.readNodeConfig(nodeId));
-      const missing = [
-        !outcome.lora && "LoRa",
-        !outcome.device && "device",
-        !outcome.position && "position",
-        !outcome.telemetry && "telemetry",
-      ].filter(Boolean);
-      // Naming what did *not* answer matters more than a count: the blanks
-      // left behind are otherwise indistinguishable from settings that are
-      // genuinely unset on the node.
-      setNote(
-        missing.length === 0
-          ? "All settings read."
-          : `Read, but the node did not answer: ${missing.join(", ")}.`,
-      );
-      onRead();
-    } catch (cause) {
-      setNote(
-        cause instanceof ApiError ? cause.message : "the request did not complete",
-      );
-    } finally {
-      setReading(false);
-    }
-  }
-
-  const canRead = canOperate && !isLocal && adminCapability === "capable";
-
-  return (
-    <section className="card p-6" aria-label="Radio settings">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-sm font-medium tracking-wide text-neutral-500 uppercase">
-          Radio settings
-          {config && (
-            <span
-              className="ml-2 normal-case"
-              title={absoluteTime(config.fetchedAt)}
-            >
-              (read {relativeTime(config.fetchedAt)})
-            </span>
-          )}
-        </h2>
-        {canRead && (
-          <button
-            type="button"
-            onClick={() => void read()}
-            disabled={reading || blockedReason !== null}
-            title={
-              blockedReason ??
-              "Ask the node for its LoRa and telemetry settings — four mesh round trips, so this is slow"
-            }
-            className="inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-3 py-1.5 text-xs text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-neutral-800 disabled:hover:text-neutral-400"
-          >
-            <Settings2
-              aria-hidden
-              className={`h-3.5 w-3.5 ${reading ? "animate-spin" : ""}`}
-            />
-            {reading ? "Reading…" : config ? "Re-read settings" : "Read settings"}
-          </button>
-        )}
-      </div>
-
-      {note && (
-        <p role="status" className="mb-4 text-sm text-amber-200/90">
-          {note}
-        </p>
-      )}
-
-      {config === null ? (
-        <p className="rounded-lg border border-neutral-800 bg-neutral-950/60 p-3 text-sm text-neutral-400 [corner-shape:bevel]">
-          {isLocal
-            ? "The local radio reports its settings when it connects. Nothing has arrived yet — check the radio status above."
-            : canRead
-              ? "Not read yet. These settings are never broadcast, so they have to be requested from the node."
-              : !canOperate
-                ? "Not read yet. Reading a node's settings needs the manager or admin role."
-                : "Not read yet. These settings are never broadcast, so they have to be requested from the node — which needs confirmed admin rights. Probe it first, under Remote administration below."}
-        </p>
-      ) : (
-        <>
-          <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-4">
-            <Field label="Region">{humanizeEnum(config.region) ?? "—"}</Field>
-            <Field
-              label="Modem preset"
-              title={
-                config.usesPreset === false
-                  ? "Ignored: this node runs explicit bandwidth, spread factor and coding rate instead of a preset"
-                  : undefined
-              }
-            >
-              {config.usesPreset === false
-                ? "Custom"
-                : (humanizeEnum(config.modemPreset) ?? "—")}
-            </Field>
-            <Field
-              label="Frequency slot"
-              mono
-              title="Nodes must agree on the slot and the preset to hear each other at all"
-            >
-              {config.frequencySlot === null
-                ? "—"
-                : config.frequencySlot === 0
-                  ? "Auto"
-                  : config.frequencySlot}
-            </Field>
-            <Field label="Hop limit" mono>
-              {config.hopLimit ?? "—"}
-            </Field>
-            {config.usesPreset === false && (
-              <>
-                <Field label="Bandwidth" mono>
-                  {config.bandwidth === null ? "—" : `${config.bandwidth} kHz`}
-                </Field>
-                <Field label="Spread factor" mono>
-                  {config.spreadFactor ?? "—"}
-                </Field>
-                <Field label="Coding rate" mono>
-                  {config.codingRate ?? "—"}
-                </Field>
-              </>
-            )}
-            <Field label="TX power" mono>
-              {config.txPower === null
-                ? "—"
-                : config.txPower === 0
-                  ? "Default"
-                  : `${config.txPower} dBm`}
-            </Field>
-            <Field label="Transmit">{flag(config.txEnabled)}</Field>
-          </dl>
-
-          <h3 className="mt-6 mb-3 border-t border-neutral-800 pt-4 text-xs tracking-wide text-neutral-500 uppercase">
-            Broadcast and sensor intervals
-          </h3>
-          <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-4">
-            <Field label="Node info" mono>
-              {interval(config.nodeInfoInterval)}
-            </Field>
-            <Field label="Position" mono>
-              {interval(config.positionInterval)}
-            </Field>
-            <Field label="GPS update" mono>
-              {interval(config.gpsUpdateInterval)}
-            </Field>
-            {/* No enable flag alongside this one: firmware's is
-                `deviceTelemetryEnabled`, which the protobuf copy inside
-                `@meshtastic/core` predates, so it never survives decoding. */}
-            <Field label="Device metrics" mono>
-              {interval(config.deviceMetricsInterval)}
-            </Field>
-            <IntervalField
-              label="Environment"
-              seconds={config.environmentInterval}
-              enabled={config.environmentEnabled}
-            />
-            <IntervalField
-              label="Air quality"
-              seconds={config.airQualityInterval}
-              enabled={config.airQualityEnabled}
-            />
-            <IntervalField
-              label="Power"
-              seconds={config.powerInterval}
-              enabled={config.powerEnabled}
-            />
-            <IntervalField
-              label="Health"
-              seconds={config.healthInterval}
-              enabled={config.healthEnabled}
-            />
-          </dl>
-        </>
-      )}
-    </section>
-  );
-}
-
-/**
- * A sensor interval alongside its enable flag.
- *
- * An interval on a disabled sensor is configured but silent, and showing the
- * number alone would have someone waiting for readings that will never come.
- */
-function IntervalField({
-  label,
-  seconds,
-  enabled,
-}: {
-  label: string;
-  seconds: number | null;
-  enabled: boolean | null;
-}) {
-  return (
-    <div>
-      <dt className="text-xs tracking-wide text-neutral-500 uppercase">
-        {label}
-      </dt>
-      <dd className="data mt-1 text-sm text-neutral-200">
-        {enabled === false ? (
-          <span className="text-neutral-500">Disabled</span>
-        ) : (
-          interval(seconds)
-        )}
-      </dd>
-    </div>
-  );
-}
-
-/**
- * Recent readings as a plain table.
- *
- * A chart would be nicer and is the obvious next step, but a table is
- * honest about gaps: a node that went silent for six hours shows six
- * missing rows rather than a line drawn straight through the outage.
- */
-function TelemetryHistory({
-  points,
-}: {
-  points: NodeDetailResponse["telemetry"];
-}) {
-  if (points.length <= 1) return null;
-
-  return (
-    <section className="card overflow-hidden" aria-label="Telemetry history">
-      <h2 className="border-b border-neutral-800 px-6 py-4 text-sm font-medium tracking-wide text-neutral-500 uppercase">
-        History — last {points.length} readings
-      </h2>
-      <div className="max-h-96 overflow-y-auto">
-        <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-neutral-950/95 text-xs tracking-wide text-neutral-500 uppercase backdrop-blur">
-            <tr>
-              <th scope="col" className="px-6 py-2 text-left font-medium">When</th>
-              <th scope="col" className="px-3 py-2 text-right font-medium">Batt</th>
-              <th scope="col" className="px-3 py-2 text-right font-medium">Volts</th>
-              <th scope="col" className="px-3 py-2 text-right font-medium">Ch util</th>
-              <th scope="col" className="px-6 py-2 text-right font-medium">Air TX</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-neutral-800/60">
-            {points.map((point) => (
-              <tr key={point.recordedAt}>
-                <td
-                  className="px-6 py-2 text-neutral-400"
-                  title={absoluteTime(point.recordedAt)}
-                >
-                  {relativeTime(point.recordedAt)}
-                </td>
-                <td className="data px-3 py-2 text-right text-neutral-300">
-                  {point.batteryLevel === null ? "—" : `${point.batteryLevel}%`}
-                </td>
-                <td className="data px-3 py-2 text-right text-neutral-300">
-                  {metric(point.voltage, "", 2)}
-                </td>
-                <td className="data px-3 py-2 text-right text-neutral-300">
-                  {metric(point.channelUtilization, "%")}
-                </td>
-                <td className="data px-6 py-2 text-right text-neutral-300">
-                  {metric(point.airUtilTx, "%")}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-/**
- * Explains who has the radio, for the `title` of a disabled control.
- *
- * Background work is worded differently on purpose: there is no banner to
- * cancel it from, so telling someone to go and cancel it would send them
- * looking for a control that is not there. It is also brief and self-clearing,
- * which is the useful thing to say.
- */
-function describeOccupancy(busy: RadioOccupancy): string {
-  const where = busy.nodeName ?? busy.nodeId;
-  if (busy.background) {
-    return `The radio is busy in the background: ${busy.label.toLowerCase()} on ${where}. This clears on its own in a few seconds.`;
-  }
-  return `The radio is busy: ${busy.label.toLowerCase()} on ${where}. Wait for it to finish, or cancel it from the banner at the top of the page.`;
-}
 
 /**
  * What to do about each admin verdict, now that editing depends on one.
@@ -1010,41 +522,7 @@ function RemoteConfig({
         </p>
       )}
 
-      {operations.length > 0 && (
-        <div className="mt-6 border-t border-neutral-800 pt-4">
-          <h3 className="mb-2 text-xs tracking-wide text-neutral-500 uppercase">
-            Recent operations
-          </h3>
-          <ul className="space-y-1 text-xs">
-            {operations.map((operation) => (
-              <li key={operation.id} className="flex flex-wrap gap-x-3">
-                <span
-                  className={
-                    operation.state === "confirmed"
-                      ? "text-emerald-400"
-                      : operation.state === "failed"
-                        ? "text-red-400"
-                        : "text-amber-400"
-                  }
-                >
-                  {operation.state}
-                </span>
-                <span className="text-neutral-500">{operation.kind}</span>
-                <span className="text-neutral-600">{operation.detail}</span>
-                <span
-                  className="text-neutral-600"
-                  title={absoluteTime(operation.createdAt)}
-                >
-                  {relativeTime(operation.createdAt)}
-                </span>
-                {operation.errorText && (
-                  <span className="text-red-500/80">{operation.errorText}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <OperationLog operations={operations} />
     </section>
   );
 }

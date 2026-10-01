@@ -1,5 +1,10 @@
 import { Protobuf } from "@meshtastic/core";
-import type { NodeRadioConfig } from "../../shared/types.js";
+import type {
+  ChannelRole,
+  NodeRadioConfig,
+  PskKind,
+  RadioChannel,
+} from "../../shared/types.js";
 
 /**
  * Builds a `NodeRadioConfig` snapshot out of protobuf config messages.
@@ -168,4 +173,48 @@ export function applyModuleConfig(
     return true;
   }
   return false;
+}
+
+/** A channel as stored: the shared shape, with the key as raw bytes. */
+export type StoredChannel = Omit<RadioChannel, "psk" | "pskKind"> & {
+  psk: Uint8Array;
+};
+
+/**
+ * Classifies a channel key without revealing it.
+ *
+ * Firmware reads a one-byte key as an index into well-known keys: 0 is no
+ * encryption, 1 the public default, 2-10 its published variants. All of
+ * those are effectively public, which is the thing an operator needs to know.
+ */
+export function pskKind(psk: Uint8Array): PskKind {
+  switch (psk.length) {
+    case 0:
+      return "none";
+    case 1:
+      return psk[0] === 0 ? "none" : psk[0] === 1 ? "default" : "simple";
+    case 16:
+      return "aes128";
+    case 32:
+      return "aes256";
+    default:
+      return "invalid";
+  }
+}
+
+export function channelFromProto(
+  channel: Protobuf.Channel.Channel,
+  fetchedAt: number,
+): StoredChannel {
+  const settings = channel.settings;
+  return {
+    index: channel.index,
+    role: (enumName(Protobuf.Channel.Channel_Role, channel.role) ?? "DISABLED") as ChannelRole,
+    name: settings?.name ?? "",
+    psk: settings?.psk ?? new Uint8Array(),
+    uplinkEnabled: settings?.uplinkEnabled ?? false,
+    downlinkEnabled: settings?.downlinkEnabled ?? false,
+    positionPrecision: num(settings?.moduleSettings?.positionPrecision),
+    fetchedAt,
+  };
 }

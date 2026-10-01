@@ -153,4 +153,30 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    name: "005_channels",
+    sql: `
+      -- The local radio's channel table, as its config dump reports it.
+      -- Stored rather than read live so the Radio page works with the radio
+      -- unplugged, like every other read in this app.
+      --
+      -- psk is a secret. It is kept because an administrator needs to see
+      -- it to share the channel, and the API strips it for every other role.
+      -- It is never written to a log line or the operation log.
+      CREATE TABLE channels (
+        node_num            INTEGER NOT NULL REFERENCES nodes(node_num) ON DELETE CASCADE,
+        idx                 INTEGER NOT NULL,
+        role                TEXT NOT NULL,
+        name                TEXT NOT NULL,
+        psk                 BLOB,
+        uplink_enabled      INTEGER NOT NULL,
+        downlink_enabled    INTEGER NOT NULL,
+        -- Null when the channel carries no module settings, which firmware
+        -- treats as "not set" rather than 0 (position sharing off).
+        position_precision  INTEGER,
+        fetched_at          INTEGER NOT NULL,
+        PRIMARY KEY (node_num, idx)
+      );
+    `,
+  },
 ];

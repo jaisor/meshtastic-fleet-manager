@@ -13,10 +13,11 @@ export const USER_ROLES: UserRole[] = ["admin", "manager", "viewer"];
 
 export const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
   admin:
-    "Everything a manager can do, plus managing user accounts and clearing the node database.",
+    "Everything a manager can do, plus changing the local radio's settings, managing user accounts and clearing the node database.",
   manager:
     "Read everything, and use the radio — probe nodes for admin access and change their configuration.",
-  viewer: "Read-only. Can see the fleet but never transmits.",
+  viewer:
+    "Read-only. Can see the fleet and re-read the local radio over USB, but never transmits.",
 };
 
 export function isUserRole(value: unknown): value is UserRole {
@@ -32,7 +33,11 @@ export function canOperateRadio(role: UserRole): boolean {
   return role === "admin" || role === "manager";
 }
 
-/** May manage accounts and destroy collected data. */
+/**
+ * May manage accounts, destroy collected data, and change the local radio's
+ * settings -- the last because a preset, slot or channel change moves the
+ * whole console onto a different mesh.
+ */
 export function canAdminister(role: UserRole): boolean {
   return role === "admin";
 }

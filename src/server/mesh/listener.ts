@@ -321,6 +321,12 @@ export class MeshListener extends EventEmitter {
       if (inMeshPacket) return;
       this.emit("localModuleConfig", config);
     });
+    // Same two dispatch sites, same hazard: the library also fires this for
+    // an admin `getChannelResponse`, which carries no node number either.
+    device.events.onChannelPacket.subscribe((channel) => {
+      if (inMeshPacket) return;
+      this.emit("localChannel", channel);
+    });
   }
 }
 

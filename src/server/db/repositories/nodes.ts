@@ -259,6 +259,28 @@ export class NodeRepository {
   }
 
   /**
+   * The USB-attached radio's own row.
+   *
+   * `is_local` is sticky -- once set it is never cleared -- so a swapped
+   * radio leaves two such rows. The connected radio's number wins when
+   * there is one; otherwise the most recently heard local row, which is
+   * what an operator means by "the radio" while it is unplugged.
+   */
+  localNode(connectedNodeNum: number | null): FleetNode | null {
+    if (connectedNodeNum !== null) {
+      const connected = this.get(connectedNodeNum);
+      if (connected) return connected;
+    }
+    const row = this.db
+      .prepare<[], NodeRow>(
+        `SELECT * FROM nodes WHERE is_local = 1
+         ORDER BY last_heard_at DESC NULLS LAST LIMIT 1`,
+      )
+      .get();
+    return row ? toFleetNode(row, this.thresholds) : null;
+  }
+
+  /**
    * Cheap membership test for the discovery gate, which runs on every
    * inbound packet. Avoids building a whole FleetNode just to ask whether
    * the row is there.
@@ -278,6 +300,23 @@ export class NodeRepository {
       .prepare<[number], NodeRow>("SELECT * FROM nodes WHERE node_num = ?")
       .get(nodeNum);
     return row ? toFleetNode(row, this.thresholds) : null;
+  }
+
+  /**
+   * The node's PKI public key, base64 as the Meshtastic apps print it, or
+   * null until a NodeInfo carrying one has arrived. Firmware before 2.5 has
+   * no keys at all, so null is a normal state, not a fault.
+   *
+   * Kept off `FleetNode` deliberately: only the detail page shows it, and the
+   * fleet list is refetched every 20s.
+   */
+  publicKeyFor(nodeNum: number): string | null {
+    const row = this.db
+      .prepare<[number], { public_key: Buffer | null }>(
+        "SELECT public_key FROM nodes WHERE node_num = ?",
+      )
+      .get(nodeNum);
+    return row?.public_key?.length ? row.public_key.toString("base64") : null;
   }
 
   setAdminCapability(nodeNum: number, capability: AdminCapability): void {

@@ -172,6 +172,87 @@ export interface NodeRadioConfig {
   healthEnabled: boolean | null;
 }
 
+/**
+ * Modem presets the decoder in `@meshtastic/core` knows. Newer firmware has
+ * more, but a preset the decoder cannot name would be read back as nothing,
+ * so offering one would be a write we could never confirm.
+ */
+export const MODEM_PRESETS = [
+  "LONG_FAST",
+  "LONG_MODERATE",
+  "LONG_SLOW",
+  "VERY_LONG_SLOW",
+  "MEDIUM_FAST",
+  "MEDIUM_SLOW",
+  "SHORT_FAST",
+  "SHORT_SLOW",
+  "SHORT_TURBO",
+] as const;
+export type ModemPreset = (typeof MODEM_PRESETS)[number];
+
+export type ChannelRole = "PRIMARY" | "SECONDARY" | "DISABLED";
+
+/**
+ * What kind of key a channel uses, which is safe to show anyone. The key
+ * itself is not.
+ *
+ * - `none`: no encryption.
+ * - `default`: the well-known public key -- encrypted on the air, but
+ *   readable by anyone running Meshtastic.
+ * - `simple`: one of the well-known variants of the default key (2-10).
+ * - `aes128` / `aes256`: a private key.
+ */
+export type PskKind = "none" | "default" | "simple" | "aes128" | "aes256" | "invalid";
+
+export interface RadioChannel {
+  /** 0-7. Index 0 is always the primary. */
+  index: number;
+  role: ChannelRole;
+  name: string;
+  pskKind: PskKind;
+  /** Base64. Sent to admins only; null for every other role. */
+  psk: string | null;
+  /** MQTT uplink / downlink. */
+  uplinkEnabled: boolean;
+  downlinkEnabled: boolean;
+  /**
+   * Bits of position precision shared on this channel: 0 shares no
+   * position, 32 is exact. Null when the channel carries no setting.
+   */
+  positionPrecision: number | null;
+  fetchedAt: number;
+}
+
+/** Everything the Radio page shows. Served from the database. */
+export interface LocalRadioDetail {
+  /** Null until the radio has connected at least once. */
+  node: FleetNode | null;
+  publicKey: string | null;
+  config: NodeRadioConfig | null;
+  /** All eight slots once read, disabled ones included. */
+  channels: RadioChannel[];
+  telemetry: TelemetryPoint[];
+  operations: AdminOperation[];
+}
+
+/** A LoRa change. Selecting a preset also turns on preset mode. */
+export interface LoRaUpdate {
+  modemPreset?: ModemPreset;
+  /** 0 derives the slot from the primary channel's name; otherwise 1-based. */
+  frequencySlot?: number;
+}
+
+/** A whole channel, as written. Firmware replaces the channel entirely. */
+export interface ChannelUpdate {
+  role: ChannelRole;
+  name: string;
+  /** Base64 of 0, 1, 16 or 32 bytes. */
+  psk: string;
+  uplinkEnabled: boolean;
+  downlinkEnabled: boolean;
+  positionPrecision: number;
+}
+
 /** Which of the four config reads answered, for reporting a partial result. */
 export interface ConfigReadOutcome {
   lora: boolean;
@@ -338,7 +419,19 @@ export interface NodeConfigUpdate {
   shortName?: string;
 }
 
-export type AdminOperationState = "pending" | "confirmed" | "failed";
+/**
+ * A remote write's lifecycle.
+ *
+ * `unconfirmed` is not a softer `failed`: the write was sent, nothing
+ * acknowledged it, and a read-back went unanswered too, so whether it landed
+ * is genuinely unknown. Reporting that as a failure invites a retry of
+ * something that may already be done.
+ */
+export type AdminOperationState =
+  | "pending"
+  | "confirmed"
+  | "unconfirmed"
+  | "failed";
 
 export interface AdminOperation {
   id: number;

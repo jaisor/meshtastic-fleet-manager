@@ -2,7 +2,11 @@ import type { FastifyInstance } from "fastify";
 import type { AppConfig } from "../config.js";
 import type { NodeRepository } from "../db/repositories/nodes.js";
 import type { AdminOperationRepository } from "../db/repositories/adminOperations.js";
-import { AdminError, type AdminClient } from "../mesh/admin.js";
+import {
+  AdminError,
+  WriteUnconfirmedError,
+  type AdminClient,
+} from "../mesh/admin.js";
 import type { CapabilityProber } from "../mesh/capability.js";
 import type { MeshListener } from "../mesh/listener.js";
 import { TaskCancelledError, type RadioTaskRegistry } from "../mesh/tasks.js";
@@ -31,7 +35,7 @@ import type {
  * message names the occupant, because "busy" alone leaves nothing to do but
  * click again.
  */
-function busyError(occupant: RadioOccupancy | null): { error: string } {
+export function busyError(occupant: RadioOccupancy | null): { error: string } {
   if (!occupant) {
     // It finished between the refusal and this call. Rare, and there is
     // nothing useful to name, so say the one thing that is certainly true.
@@ -118,7 +122,12 @@ export function registerApiRoutes(
     },
   );
 
-  app.get("/api/nodes", async () => ({ nodes: deps.nodes.list() }));
+  // The local radio is the instrument, not a member of the fleet: it has its
+  // own page (`/api/radio`). `/api/nodes/:id` still answers for it, so an old
+  // link resolves and the client can redirect.
+  app.get("/api/nodes", async () => ({
+    nodes: deps.nodes.list().filter((node) => !node.isLocal),
+  }));
 
   app.get<{ Params: { id: string } }>(
     "/api/nodes/:id",
@@ -139,6 +148,7 @@ export function registerApiRoutes(
         positions: deps.nodes.positionsFor(nodeNum, POSITION_LIMIT),
         operations: deps.operations.recentFor(nodeNum, OPERATION_LIMIT),
         config: deps.nodes.configFor(nodeNum),
+        publicKey: deps.nodes.publicKeyFor(nodeNum),
       };
     },
   );
@@ -373,23 +383,37 @@ export function registerApiRoutes(
       const detail = Object.entries(update.value)
         .map(([key, value]) => `${key}=${value}`)
         .join(", ");
-      const operationId = deps.operations.create(nodeNum, "setOwner", detail);
       const started = deps.tasks.start({
         kind: "config",
         label: "Applying configuration",
         nodeNum,
         nodeName: node.longName ?? node.shortName ?? null,
-        timeoutSeconds: deps.config.fleet.admin_probe_timeout,
+        // Read the current owner, write, and -- if the write goes
+        // unacknowledged -- read back: up to three round trips.
+        timeoutSeconds: 3 * deps.config.fleet.admin_probe_timeout,
       });
 
       if (!started) {
         return reply.status(409).send(busyError(deps.tasks.occupancy()));
       }
       const { task, signal } = started;
+      // Only once the radio is ours: created before, a 409 left a row
+      // pending until the next restart.
+      const operationId = deps.operations.create(nodeNum, "setOwner", detail);
 
       try {
-        await deps.admin.setOwner(nodeNum, update.value, signal);
-        deps.operations.settle(operationId, "confirmed", null);
+        const confirmedBy = await deps.admin.setOwner(
+          nodeNum,
+          update.value,
+          signal,
+        );
+        deps.operations.settle(
+          operationId,
+          "confirmed",
+          confirmedBy === "readback"
+            ? "not acknowledged; confirmed by reading the node back"
+            : null,
+        );
 
         // The remote is now authoritative for these names; reflect them
         // locally so the UI does not show the old ones until the next
@@ -401,7 +425,7 @@ export function registerApiRoutes(
         });
         deps.nodes.setAdminCapability(nodeNum, "capable");
 
-        return { operationId, state: "confirmed" as const };
+        return { operationId, state: "confirmed" as const, confirmedBy };
       } catch (cause) {
         // Cancelling a write is the ambiguous case: the packet may already
         // be on the air, so the change may yet land on the node. Record it
@@ -418,6 +442,22 @@ export function registerApiRoutes(
               "Cancelled. The request may already have reached the node, so re-check its name before retrying.",
             operationId,
             state: "failed" as const,
+          });
+        }
+
+        // Sent, unacknowledged, and the read-back unanswered too. Not a
+        // failure: say so, and leave the admin verdict alone, since nothing
+        // was established either way.
+        if (cause instanceof WriteUnconfirmedError) {
+          deps.operations.settle(operationId, "unconfirmed", cause.message);
+          request.log.warn(
+            { ...logNode(nodeNum), err: cause.message },
+            "remote config unconfirmed",
+          );
+          return reply.status(504).send({
+            error: cause.message,
+            operationId,
+            state: "unconfirmed" as const,
           });
         }
 
@@ -450,7 +490,7 @@ const MAX_SHORT_NAME = 4;
  * Firmware truncates over-long names silently, which would leave the UI
  * showing something the node never stored. Reject instead.
  */
-function validateConfigUpdate(
+export function validateConfigUpdate(
   body: NodeConfigUpdate | undefined,
 ): { value: NodeConfigUpdate } | { error: string } {
   const value: NodeConfigUpdate = {};

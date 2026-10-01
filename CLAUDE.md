@@ -42,8 +42,11 @@ and remotely reconfiguring them.
 
 - `/login` — password form.
 - `/` — fleet list: node ID, short name, long name, last check-in, admin-capable badge.
+  The USB-attached radio is **not** listed; it is the instrument, not a fleet member.
 - `/nodes/:id` — detail: full identity, telemetry history, position, link quality, and
-  the remote-configuration form.
+  the remote-configuration form. The local radio's id redirects to `/radio`.
+- `/radio` — the local radio (user menu, every role): identity, public key, settings,
+  channels, telemetry, operation log. Re-read for everyone; changes for admins.
 
 ---
 
@@ -120,6 +123,7 @@ src/server/
     migrations.ts            ordered array of {name, sql}; forward-only
     repositories/nodes.ts    nodes, telemetry, positions, settings snapshots
     repositories/adminOperations.ts   the remote-write audit log
+    repositories/channels.ts the local radio's channel table (keys included)
   mesh/
     nodeId.ts                nodeNum <-> "!hex" conversion
     listener.ts              serial connect, reconnect/backoff, event fan-out
@@ -132,11 +136,14 @@ src/server/
     watchdog.ts              local-radio self-check, restart on failure, air silence
     tasks.ts                 registry of user-initiated operations + cancellation
   routes/api.ts              HTTP handlers; thin
+  routes/radio.ts            the local radio: read-back for all, writes for admins
 src/web/
   main.tsx  App.tsx  api.ts  router.ts  index.css  index.html
   components/  Backdrop, Layout, StatusDot, SignalDot, CapabilityBadge,
-               RadioTaskBanner, format.ts
-  pages/       Login, Fleet, NodeDetail
+               RadioTaskBanner, format.ts,
+               NodeFields (fields, name editor, public key, telemetry, op log),
+               RadioSettings (the read-only settings panel)
+  pages/       Login, Fleet, NodeDetail, Radio, Admin
   pages/fleetOrdering.ts   pure filter + comparator logic for the fleet list
   pages/fleetView.ts       the list's search/sort selections, persisted per tab
 ```
@@ -342,6 +349,37 @@ remote node require a passkey obtained from a prior read/session request, and it
 (firmware currently ~300s). `mesh/admin.ts` owns acquiring, caching, expiring, and
 re-acquiring it per target node, and correlating responses back to in-flight requests.
 
+**Reads are answered with data; writes with a routing ACK.** Firmware's `AdminModule` ends
+every request with *"if asked for a response and it is not yet set, generate an 'ACK'
+response"* (`AdminModule.cpp`, checked against `develop` on 2026-09-30): a `ROUTING_APP`
+packet, error `NONE`, `request_id` = our packet id, **from the target**. For a write that
+ACK is the only confirmation there is. The client used to discard every `NONE` routing
+packet as uninteresting, so a write that worked could only ever end in a timeout and be
+logged as `failed` — which is what operators saw. Two rules make the ACK trustworthy:
+
+- **It counts only from the node addressed.** Our own radio and every relay emit the same
+  shape to say the packet moved on (`MeshModule.cpp` delivers an overheard-rebroadcast ACK
+  locally). A `NONE` from anyone else is progress, and the waiter keeps waiting.
+- **Correlate on `decoded.requestId`, from `onMeshPacket`.** The library's typed
+  `onRoutingPacket` carries only the routing packet's *own* id, which matches nothing. The
+  old handler keyed on it, so refusals (`NOT_AUTHORIZED`, `ADMIN_PUBLIC_KEY_UNAUTHORIZED`)
+  never matched either and a denied probe read as `unknown` rather than `unauthorized`.
+
+The client picks each packet id itself and sends through `sendRaw`
+(`buildAdminToRadio`, shared with the watchdog), so the waiter exists before anything is on
+the air. `sendPacket` only returns its id once the send queue sees an ACK, which forced the
+old "orphan" buffer and started the timeout late. The timeout now runs from the send.
+
+**An unanswered write is checked, not assumed.** Over several hops the ACK often loses the
+race with the timeout, or is lost while the write itself landed. So `setOwner` treats
+anything short of an explicit refusal as doubt and **reads the owner record back**. If it
+matches, the write is confirmed (the operation's note says it was by read-back). If it
+differs, it is a definite "not applied" naming what the node reports. If the read-back goes
+unanswered as well, the write is **`unconfirmed`**: its own operation state and a 504 from
+the route. That state leaves the stored names and the admin verdict alone and renders
+amber, because the change may well have landed and calling it failed invites a retry. An
+explicit refusal (`unauthorized` class) and a cancel skip the read-back.
+
 **Authorization model.** `Config.SecurityConfig` on the *remote* node holds:
 
 - `adminKey: Uint8Array[]` — public keys authorized to send it admin messages.
@@ -490,7 +528,10 @@ name is reserved so a database user can never shadow it. `users.username` carrie
 
 **Three roles**, defined once in `shared/roles.ts` so the server's enforcement and the
 UI's affordances cannot drift: `viewer` reads, `manager` also operates the radio (probe,
-remote config, cancelling a task), `admin` also manages accounts and clears collected data.
+remote config, cancelling a task), `admin` also manages accounts, clears collected data,
+and changes the local radio's settings. Re-reading the local radio is open to `viewer`
+too: it is a USB exchange that transmits nothing, and "viewers never transmit" is the rule
+that matters.
 The capability helpers (`canOperateRadio`, `canAdminister`) are shared rather than
 re-derived from string comparisons on each side.
 
@@ -845,8 +886,38 @@ bloom over near-black.
   "the change may still have been applied" rather than claiming it did not happen, and does
   not touch the admin verdict, because nothing was established either way.
 - **Mesh writes are never optimistic.** Every remote operation is a row in
-  `admin_operations` with pending → confirmed | failed, surfaced in the UI. Pending rows
-  are failed at startup, since they belong to a dead process with no waiter.
+  `admin_operations` with pending → confirmed | unconfirmed | failed, surfaced in the UI
+  (§5 has what separates the last two). Pending rows are failed at startup, since they
+  belong to a dead process with no waiter. The row is created only once the radio lock is
+  held; created earlier, a 409 left it pending until the next restart.
+- **The local radio has its own page, and its own rules** (`routes/radio.ts`,
+  `pages/Radio.tsx`). What makes remote preset changes off-limits does not apply: a bad
+  preset, slot or channel moves the console onto the wrong mesh, but the radio is still on
+  the cable. So its LoRa preset, frequency slot and channels are writable, **admin only**,
+  each confirmed in a second step that says what it costs.
+  - *Every request is admin-to-self over USB.* Firmware zeroes `from` on everything
+    arriving over the API (`MeshService.cpp`) and trusts `from == 0` as a local client,
+    so no session passkey is needed. Writes still take the radio lock: a LoRa change
+    reboots the radio about five seconds after it is ACKed, killing any remote exchange
+    in flight. The re-read takes no lock, for the watchdog's reason (no airtime).
+  - *One `set_*` per save, no edit transaction.* `commit_edit_settings` saves without ever
+    rebooting, so a LoRa change inside a transaction would skip the reboot it needs.
+  - *Patch decoded messages in place, never rebuild them.* `setConfig` and `setChannel`
+    replace the whole block, and core's bundled protobufs lack `LoRaConfig.femLnaMode` and
+    `serialHalOnly` (§4). A decoded message keeps those in its unknown fields and
+    re-encodes them; a block rebuilt with `create({...decoded})` would quietly reset them.
+    Verified by decoding what the stub received with the newer schema.
+  - *Channels are read back after every write, even an ACKed one,* and stored as read:
+    firmware coarsens position precision on a public-key channel, and the row should be
+    what the radio holds, not what was asked. Precision is therefore left out of the
+    write's not-applied comparison.
+  - *Channel keys are secrets.* They are stored (the page must work offline) but sent
+    only to admins; everyone else gets `pskKind`. The operation log records the key's
+    kind, never the key. Validation refuses what firmware would accept and then misbehave
+    on: a demoted or disabled channel 0, a second primary, a key that is not 0/1/16/32
+    bytes.
+  - *Channels come from the config dump* via `onChannelPacket`, which has the same two
+    dispatch sites as `onConfigPacket` (§4) and is guarded the same way.
 - **Imports:** double-quoted, `import type` for types (`verbatimModuleSyntax` is on).
   `noUnusedLocals` / `noUnusedParameters` are on — dead variables fail the build.
 - The web build sets `erasableSyntaxOnly`, which **forbids constructor parameter
@@ -936,6 +1007,30 @@ minutes and stops at teardown; `restart()` tears down once and schedules exactly
 reconnect. End to end through the scheduler, a dead radio was restarted 63s after start.
 `/api/status` carries the watchdog over HTTP, reading `pending` with no radio.
 
+**Remote writes are verified against a stub mesh** (2026-09-30): a real `MeshDevice` over a
+stub transport playing both the local radio and a remote node, and the real config route
+over HTTP. These pass: a write confirmed by the target's routing ACK, while our radio's
+look-alike ACK is ignored; an applied but unacknowledged write confirmed by read-back; a
+dropped write reported as not applied, naming the node's actual value; no ACK and no
+read-back answer giving `unconfirmed` (504, with names and verdict untouched); a refusal
+failing at once as `unauthorized` with no read-back; a probe refusal now classified
+`unauthorized`; a read answered only by an ACK failing in under a second instead of timing
+out; a cancel mid-write skipping the read-back; and a 409 leaving no operation row.
+
+**The Radio page is verified against a stub radio and in a browser** (2026-09-30). Server:
+the config dump stores all eight channels, and a channel response inside a mesh packet is
+not filed as local; the fleet list omits the local radio; keys reach admins only; a viewer
+can re-read; every write is 403 for viewer and manager; a rename keeps the other name; the
+LoRa write sets preset, preset mode and slot and preserves `femLnaMode`; eight bad channel
+inputs are rejected; a channel write is stored as read back with the precision clamp; no
+key reaches the operation log; a held radio gives writes 409 while re-read works; and with
+no radio, re-read and writes 503 while `GET /api/radio` still serves. Browser (headless
+Edge over the DevTools protocol, status stubbed to connected): admin and viewer at 1280px,
+admin at 390px, LoRa and channel editors with their confirmations, the menu per role, and
+the `/nodes/<local>` redirect, with no overflow and no console or HTTP errors. What is
+*not* verified is any of it against real firmware, the reboot after a LoRa change above
+all.
+
 **Not verified, and the first things to check with hardware in hand:**
 
 - **That a self-addressed admin request is answered over serial the way the stub
@@ -951,11 +1046,11 @@ reconnect. End to end through the scheduler, a dead radio was restarted 63s afte
   `configure()`, reconnect after unplug, and every ingest path. All of it is written
   against the published type declarations, not against observed packets. (The *failure*
   side of connect is verified — see above.)
-- **Whether a write admin message actually answers.** `mesh/admin.ts` sends `setOwner` with
-  `wantResponse` and waits for a reply. If firmware does not respond to admin *writes* the
-  way it does to reads, that call will time out and report `failed` even though the change
-  was applied. This is the single most likely thing to be wrong. If it is, treat a write
-  timeout as "sent, unconfirmed" — a distinct state, not a success.
+- **That a real remote's write ACK arrives as the firmware source says.** This used to be
+  listed here as the most likely thing to be wrong, and it was: writes that landed were
+  reported as failed (§5). The fix is verified only against a stub mesh. With hardware,
+  rename a node one hop away and confirm the operation reads `confirmed` with no read-back
+  note. A read-back note on every write would mean the ACK is still not being matched.
 - The `auto` serial-port heuristic and its USB vendor-ID list.
 - **Device passthrough and the `group_add` GID**, which are the only parts of the container
   that need real hardware. Everything else about the image is now verified (below).

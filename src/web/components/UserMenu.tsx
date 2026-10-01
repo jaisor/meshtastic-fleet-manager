@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, LogOut, ShieldCheck, UserRound } from "lucide-react";
+import {
+  ChevronDown,
+  LogOut,
+  RadioTower,
+  ShieldCheck,
+  UserRound,
+} from "lucide-react";
 import type { SessionUser } from "../../shared/types";
 import { canAdminister } from "../../shared/roles";
 
@@ -70,6 +76,21 @@ export function UserMenu({
               {user.builtIn && " · defined in config.yaml"}
             </p>
           </div>
+
+          {/* Every role: viewers can read the radio's page and re-read it
+              over USB, which transmits nothing. */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onNavigate("/radio");
+            }}
+            className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-neutral-300 transition hover:bg-neutral-800 hover:text-amber-400"
+          >
+            <RadioTower aria-hidden className="h-4 w-4" />
+            Radio
+          </button>
 
           {canAdminister(user.role) && (
             <button

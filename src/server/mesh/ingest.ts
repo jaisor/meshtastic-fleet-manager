@@ -2,6 +2,7 @@ import type { Types } from "@meshtastic/core";
 import { Protobuf } from "@meshtastic/core";
 import type { FastifyBaseLogger } from "fastify";
 import type { NodeRepository } from "../db/repositories/nodes.js";
+import type { ChannelRepository } from "../db/repositories/channels.js";
 import type { DiscoveryRules } from "../config.js";
 import { admits, describeRules, isRestricted } from "./discovery.js";
 import { logNode } from "./nodeId.js";
@@ -11,6 +12,7 @@ import {
   emptyRadioConfig,
 } from "./radioConfig.js";
 import type { MeshListener } from "./listener.js";
+import { channelFromProto, type StoredChannel } from "./radioConfig.js";
 
 /**
  * Turns listener events into database writes. This is the only writer to
@@ -97,6 +99,7 @@ function hopsTravelled(packet: Protobuf.Mesh.MeshPacket): number | null {
 export function attachIngest(
   listener: MeshListener,
   nodes: NodeRepository,
+  channels: ChannelRepository,
   discovery: DiscoveryRules,
   logger: FastifyBaseLogger,
   onAdmitted?: (nodeNum: number) => void,
@@ -219,6 +222,26 @@ export function attachIngest(
     },
   );
 
+  /**
+   * The local radio's channels, one event per slot in its dump. Held until
+   * the node number is known for the same reason as the config above, then
+   * written slot by slot: each is a complete record, so there is nothing to
+   * accumulate.
+   */
+  const pendingChannels: StoredChannel[] = [];
+
+  function flushLocalChannels(): void {
+    if (localNodeNum === null) return;
+    for (const channel of pendingChannels.splice(0)) {
+      channels.save(localNodeNum, channel);
+    }
+  }
+
+  listener.on("localChannel", (channel: Protobuf.Channel.Channel) => {
+    pendingChannels.push(channelFromProto(channel, nowSeconds()));
+    flushLocalChannels();
+  });
+
   listener.on("myNodeInfo", (info: Protobuf.Mesh.MyNodeInfo) => {
     localNodeNum = info.myNodeNum;
     nodes.upsert({
@@ -230,6 +253,7 @@ export function attachIngest(
     // The dump sends MyNodeInfo before the config messages, but if that ever
     // reorders the snapshot would sit in memory with nowhere to go.
     saveLocalConfig();
+    flushLocalChannels();
   });
 
   /**

@@ -2,7 +2,10 @@ import type { UserRole } from "../shared/roles";
 import type {
   AdminCapability,
   AdminOperation,
+  ChannelUpdate,
   ConfigReadOutcome,
+  LocalRadioDetail,
+  LoRaUpdate,
   FleetNode,
   NodeConfigUpdate,
   NodeRadioConfig,
@@ -58,6 +61,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+export interface WriteResult {
+  operationId: number;
+  state: "confirmed";
+  confirmedBy: "ack" | "readback";
+}
+
 export interface StatusResponse {
   radio: RadioStatus;
   staleAfter: number;
@@ -78,6 +87,8 @@ export interface NodeDetailResponse {
   operations: AdminOperation[];
   /** Null until somebody reads this node's settings. */
   config: NodeRadioConfig | null;
+  /** Base64 PKI public key; null until a NodeInfo carrying one arrives. */
+  publicKey: string | null;
 }
 
 export const api = {
@@ -146,6 +157,32 @@ export const api = {
       `/api/nodes/${encodeURIComponent(nodeId)}/config/read`,
       { method: "POST" },
     ),
+
+  getRadio: () => request<LocalRadioDetail>("/api/radio"),
+
+  readRadio: () =>
+    request<{ outcome: ConfigReadOutcome; channelsRead: number }>(
+      "/api/radio/read",
+      { method: "POST" },
+    ),
+
+  updateRadioOwner: (update: NodeConfigUpdate) =>
+    request<WriteResult>("/api/radio/owner", {
+      method: "PATCH",
+      body: JSON.stringify(update),
+    }),
+
+  updateRadioLoRa: (update: LoRaUpdate) =>
+    request<WriteResult & { restarting?: boolean }>("/api/radio/lora", {
+      method: "PATCH",
+      body: JSON.stringify(update),
+    }),
+
+  updateRadioChannel: (index: number, update: ChannelUpdate) =>
+    request<WriteResult>(`/api/radio/channels/${index}`, {
+      method: "PUT",
+      body: JSON.stringify(update),
+    }),
 
   updateNodeConfig: (nodeId: string, update: NodeConfigUpdate) =>
     request<{ operationId: number; state: string }>(
