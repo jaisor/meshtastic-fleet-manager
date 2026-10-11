@@ -134,6 +134,7 @@ src/server/
     admin.ts                 AdminMessage build/send/correlate, session passkey
     capability.ts            periodic admin probe sweep
     watchdog.ts              local-radio self-check, restart on failure, air silence
+    localRadio.ts            full read-back of the local radio; re-run after every config dump
     tasks.ts                 registry of user-initiated operations + cancellation
   routes/api.ts              HTTP handlers; thin
   routes/radio.ts            the local radio: read-back for all, writes for admins
@@ -558,6 +559,21 @@ that way: register new API routes inside that scope, not on the root instance.
 
 Failed logins sleep ~750ms before replying, which is the whole of the rate limiting.
 
+**`auth.enabled: false` turns sign-in and roles off.** Every request then acts as the
+built-in admin, exactly as if that account had signed in: no login page, no sign-out (the
+menu says where the setting lives instead), and radio writes, account management and purges
+all permitted. Implemented as one constant returned from `currentUser()`, which
+`requireSession`, `requireCapability` and the per-user decisions (who is sent channel keys)
+all read through. A per-guard bypass would leave any guard that missed it answering 401. No
+password is needed while it is off, but one may stay in the file; two is still rejected.
+`SessionResponse.authDisabled` tells the UI, and the Admin page says that the accounts listed
+are kept but have no effect until sign-in is back on. The server logs a warning on every
+start while auth is off, naming the bound host and port.
+Verified (2026-10-11) on a throwaway instance with no password and no radio: the session
+endpoints all answer as the admin with no cookie; fleet, radio and account routes answer 200;
+creating and deleting an account works; a radio write gets 503 from the radio gate, not 401
+or 403; three config shapes validate as intended; and an auth-on server still answers 401.
+
 ---
 
 ## 9. Docker
@@ -918,6 +934,45 @@ bloom over near-black.
     bytes.
   - *Channels come from the config dump* via `onChannelPacket`, which has the same two
     dispatch sites as `onConfigPacket` (§4) and is guarded the same way.
+  - *Which node is the local radio is never stored.* It is `RadioStatus.localNodeNum`:
+    the number the radio reported in `MyNodeInfo` on the **current** connection, cleared
+    when the connection ends. `NodeRepository` takes it as a function and derives
+    `FleetNode.isLocal` from it at read time; the fleet filter, the `/nodes/<local>`
+    redirect and the capability sweep's exclusion all follow from that.
+    This replaced a persisted `is_local` flag, and the flag is why the console once
+    presented jjab (an NRF52 unplugged ten days earlier) as the attached radio, with its
+    name, settings and editors, while the ESP32-S3 actually on COM16 never sent a byte.
+    `/api/radio` fell back to "the most recent row flagged local" whenever nothing had
+    identified, and the header pill went green as soon as the port opened.
+    Migration 006 drops the column. What survives is history: `last_local_at`, written by
+    `recordLocal` when a radio identifies (it returns the previous radio, so a swap is
+    logged) and read only through `lastLocal()`. `/api/radio` sends `node: null` and that
+    history as `lastIdentified` until a radio identifies, and the page renders it as one
+    dated line linking to that node's ordinary page, never as the current radio.
+  - *An open port is not a working radio.* `listener.getIdentifiedDevice()` returns the
+    device only once the radio has identified itself, and `unavailableReason()` gives the
+    503 text ("connected but has not identified itself"). Every route that uses the radio,
+    the capability sweep and the enricher gate on it. Only the watchdog keeps
+    `getDevice()`, because watching that state is its job. In the UI, the pill is green
+    only once the radio has identified. An open port with no identity shows amber "Radio
+    connecting" for 20s, then "Radio not responding"; after 60s the degraded banner
+    appears, because the console is as read-only as with the radio unplugged. The node
+    page's `radioConnected` means identified too.
+  - *The radio is probed every time it finishes its dump* (`LocalRadioProbe`): owner,
+    metadata, settings and all eight channels, the same read as the Re-read button
+    (`readLocalRadio`, shared by both). It triggers on `DeviceConfigured`, i.e. the
+    radio's `configCompleteId`, not on the listener's `connected`. `configure()` resolves
+    once `wantConfigId` is *sent*, so at `connected` the node number is usually still
+    unknown. A failure to answer owner or metadata ends the probe with one warning rather
+    than twelve timeouts. A disconnect aborts it, because `AdminClient` does not notice a
+    vanished radio on its own. Errors are logged, never rethrown, so the crash guard does
+    not cycle a working link over a read-back.
+    A successful probe logs one readable line (`describeLocalRadio`), with the same facts
+    as structured fields: `Found USB-connected node jjab / JJA Mesh - B, id !3e2561af, on
+    MediumFast#45 (US), NRF52_UNKNOWN, firmware 2.7.26.54e0d8d`. Slot 0 prints `#auto`
+    (firmware derives it from the channel name), and with preset mode off it prints
+    `custom BW/SF/CR`, since the preset field is then stale. The line is built from what is
+    stored after the read, so a part the radio did not answer falls back to the config dump.
 - **Imports:** double-quoted, `import type` for types (`verbatimModuleSyntax` is on).
   `noUnusedLocals` / `noUnusedParameters` are on — dead variables fail the build.
 - The web build sets `erasableSyntaxOnly`, which **forbids constructor parameter
@@ -1030,6 +1085,40 @@ admin at 390px, LoRa and channel editors with their confirmations, the menu per 
 the `/nodes/<local>` redirect, with no overflow and no console or HTTP errors. What is
 *not* verified is any of it against real firmware, the reboot after a LoRa change above
 all.
+
+**Local-radio identification and the connect probe are verified** (2026-10-10) against a
+temporary database with the real repositories and ingest, a fake listener and a fake admin
+client. These pass: a restart with a radio that never identifies leaves no node local, the
+last radio in the fleet and the capability sweep, and that radio available only as dated
+history; no `is_local` column survives the migration; identifying makes exactly that node
+local and logs a swap; after a disconnect nothing is local; nothing is read
+before the dump completes; the full read runs once, even with a duplicate trigger, and
+stores names, firmware, key, settings and channels, with a missed channel logged; a silent
+radio stops after one failed read; a disconnect abandons the read and the next connect
+reads again. *Not* verified against the library: that `DeviceConfigured` fires once per
+dump on real firmware.
+**The stale-radio fix was reproduced against the real failure** (2026-10-11): a copy of
+the live database, where jjab was flagged local, served by a server on the silent COM16
+ESP32-S3. `/api/radio` gave `node: null` with jjab as history only; jjab was back in the
+fleet; a probe and a radio re-read both got 503 "connected but has not identified
+itself"; and headless Edge showed the amber "Radio not responding" pill, the banner, and
+the page naming no radio.
+
+**An ESP32-S3 on Windows (COM16, `303A:1001`, the built-in USB-Serial/JTAG) sent nothing
+at all** (2026-10-10). The port opened and our `wantConfigId` went out well-formed
+(`94c3 0005 18…`, seen on a temporary byte tap). Not one byte came back across several
+opens: no frames, no log text, and no answer to an esptool SYNC either, so it was not in
+the ROM downloader. A one-off RTS reset pulse did not change that. The cause is still
+open, so check the board itself first: screen or LED, a press of RST, and
+`meshtastic --port COM16 --info` with the server stopped. If the CLI gets nothing either,
+the cause is on the device side (serial disabled in `SecurityConfig.serial_enabled`, or
+a hung USB stack), not here. The watchdog caught it as designed: "has not finished
+sending its configuration after 180s", then a restart.
+`openSerialPort` now raises **DTR and RTS together** after opening. On Windows the
+binding raises DTR alone (RTS needs `rtscts`), and on an ESP32's USB-Serial/JTAG
+DTR-without-RTS holds GPIO0 low, so any reboot in that state boots the ROM downloader
+instead of Meshtastic. Both up matches a Linux tty, pyserial and Web Serial. It did
+**not** revive this radio, so it is a precaution, not the fix.
 
 **Not verified, and the first things to check with hardware in hand:**
 

@@ -11,6 +11,7 @@ import { canAdminister } from "../../shared/roles.js";
 import { currentUser, requireCapability } from "../auth.js";
 import type { ChannelRepository } from "../db/repositories/channels.js";
 import { AdminError, WriteUnconfirmedError } from "../mesh/admin.js";
+import { readLocalRadio } from "../mesh/localRadio.js";
 import { logNode } from "../mesh/nodeId.js";
 import { channelFromProto, pskKind } from "../mesh/radioConfig.js";
 import { TaskCancelledError } from "../mesh/tasks.js";
@@ -56,8 +57,14 @@ export function registerRadioRoutes(
 ): void {
   const requireAdmin = requireCapability(deps.auth, "administer");
 
+  /**
+   * The radio on the cable, by the number it reported on this connection.
+   * Deliberately nothing else: falling back to the last radio stored here
+   * once presented an NRF52 unplugged ten days earlier as the attached radio,
+   * while the ESP32-S3 actually on the cable answered nothing at all.
+   */
   const localNodeNum = (): number | null =>
-    deps.nodes.localNode(deps.listener.getStatus().localNodeNum)?.nodeNum ?? null;
+    deps.listener.getIdentifiedDevice() ? deps.listener.getStatus().localNodeNum : null;
 
   app.get("/api/radio", async (request): Promise<LocalRadioDetail> => {
     const nodeNum = localNodeNum();
@@ -70,6 +77,7 @@ export function registerRadioRoutes(
         channels: [],
         telemetry: [],
         operations: [],
+        lastIdentified: deps.nodes.lastLocal(),
       };
     }
     return {
@@ -81,61 +89,31 @@ export function registerRadioRoutes(
       }),
       telemetry: deps.nodes.telemetryFor(nodeNum, TELEMETRY_LIMIT),
       operations: deps.operations.recentFor(nodeNum, OPERATION_LIMIT),
+      lastIdentified: null,
     };
   });
 
   /**
    * Reads everything back from the radio: identity, settings, all eight
-   * channel slots.
+   * channel slots. The same read runs by itself whenever the radio finishes
+   * its config dump (`LocalRadioProbe`); this is the button for it.
    *
    * Takes no radio lock. Every request is addressed to the radio itself and
    * answered over USB without transmitting, so it contends with nothing on
    * the air -- the same reasoning as the watchdog's self-check.
    */
   app.post("/api/radio/read", async (request, reply) => {
-    const device = deps.listener.getDevice();
     const nodeNum = deps.listener.getStatus().localNodeNum;
-    if (!device || nodeNum === null) {
-      return reply.status(503).send({ error: "local radio is not connected" });
+    const blocked = deps.listener.unavailableReason();
+    if (blocked !== null || nodeNum === null) {
+      return reply.status(503).send({ error: blocked ?? "local radio is not connected" });
     }
 
     try {
-      const owner = await deps.admin.getOwner(nodeNum);
-      deps.nodes.upsert({
-        nodeNum,
-        longName: owner.longName || null,
-        shortName: owner.shortName || null,
-        publicKey: owner.publicKey.length > 0 ? owner.publicKey : null,
-        lastHeardAt: Math.floor(Date.now() / 1000),
+      const { outcome, channelsRead } = await readLocalRadio(nodeNum, {
+        ...deps,
+        logger: request.log,
       });
-
-      const metadata = await deps.admin.getMetadata(nodeNum);
-      deps.nodes.upsert({
-        nodeNum,
-        firmwareVersion: metadata.firmwareVersion || null,
-      });
-
-      const { config, outcome } = await deps.admin.readRadioConfig(nodeNum);
-      if (outcome.lora || outcome.device || outcome.position || outcome.telemetry) {
-        deps.nodes.saveConfig(nodeNum, config);
-      }
-
-      let channelsRead = 0;
-      for (let index = 0; index < 8; index++) {
-        try {
-          const channel = await deps.admin.getChannel(nodeNum, index);
-          deps.channels.save(
-            nodeNum,
-            channelFromProto(channel, Math.floor(Date.now() / 1000)),
-          );
-          channelsRead += 1;
-        } catch (cause) {
-          request.log.warn(
-            { ...logNode(nodeNum), index, err: (cause as Error).message },
-            "local channel read failed",
-          );
-        }
-      }
 
       request.log.info(
         { ...logNode(nodeNum), outcome, channelsRead },
@@ -254,8 +232,9 @@ export function registerRadioRoutes(
     },
   ): Promise<FastifyReply | object> {
     const nodeNum = deps.listener.getStatus().localNodeNum;
-    if (!deps.listener.getDevice() || nodeNum === null) {
-      return reply.status(503).send({ error: "local radio is not connected" });
+    const blocked = deps.listener.unavailableReason();
+    if (blocked !== null || nodeNum === null) {
+      return reply.status(503).send({ error: blocked ?? "local radio is not connected" });
     }
     const node = deps.nodes.get(nodeNum);
 

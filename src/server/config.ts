@@ -43,12 +43,25 @@ const schema = z.object({
     .prefault({}),
   auth: z
     .object({
+      /**
+       * False turns sign-in and roles off: every request is treated as the
+       * built-in admin. For a console reachable only from a trusted network.
+       */
+      enabled: z.boolean().default(true),
       password: z.string().min(1).optional(),
       password_hash: z.string().min(1).optional(),
     })
-    .refine((v) => Boolean(v.password) !== Boolean(v.password_hash), {
-      message: "set exactly one of auth.password or auth.password_hash",
-    }),
+    // With auth on, exactly one. With it off neither is needed, but one may
+    // stay in the file for when it is turned back on; two is still a mistake.
+    .refine(
+      (v) =>
+        v.enabled
+          ? Boolean(v.password) !== Boolean(v.password_hash)
+          : !(v.password && v.password_hash),
+      {
+        message: "set exactly one of auth.password or auth.password_hash",
+      },
+    ),
   serial: z
     .object({
       /** A device path, or "auto" to pick the first likely Meshtastic port. */
@@ -159,8 +172,11 @@ export interface DiscoveryRules {
 
 export type AppConfig = z.infer<typeof schema> & {
   discoveryRules: DiscoveryRules;
-  /** Resolved at load time; never the plaintext from the file. */
-  passwordHash: string;
+  /**
+   * Resolved at load time; never the plaintext from the file. Null only with
+   * auth disabled and no password set, in which case nobody signs in at all.
+   */
+  passwordHash: string | null;
   sessionSecret: string;
 };
 
@@ -217,7 +233,9 @@ export function loadConfig(path: string): AppConfig {
   // database, or an error message further down.
   const passwordHash = config.auth.password_hash
     ? config.auth.password_hash
-    : hashPassword(config.auth.password as string);
+    : config.auth.password
+      ? hashPassword(config.auth.password)
+      : null;
   config.auth.password = undefined;
 
   if (!config.server.session_secret) {

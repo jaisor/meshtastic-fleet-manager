@@ -32,7 +32,8 @@ export function Layout({
   user: SessionUser;
   onCancelTask: (task: RadioTask) => void;
   onNavigate: (path: string) => void;
-  onLogout: () => void;
+  /** Null when sign-in is disabled in config and there is nothing to end. */
+  onLogout: (() => void) | null;
   children: ReactNode;
 }) {
   return (
@@ -51,7 +52,9 @@ export function Layout({
         </div>
       </header>
 
-      {radio && !radio.connected && <DegradedBanner radio={radio} />}
+      {radio && (!radio.connected || silentFor(radio) > SILENT_BANNER_SECONDS) && (
+        <DegradedBanner radio={radio} />
+      )}
 
       <RadioTaskBanner tasks={tasks} onCancel={onCancelTask} />
 
@@ -65,7 +68,31 @@ export function Layout({
 }
 
 /**
- * Shown whenever the radio is not connected.
+ * An open port proves nothing about the radio on it. Until the radio sends
+ * its node number it is not "connected" in any sense an operator cares
+ * about: nothing it hears arrives, and nothing can be sent to it.
+ */
+function identified(radio: RadioStatus): boolean {
+  return radio.connected && radio.localNodeNum !== null;
+}
+
+/** Seconds the port has been open without the radio identifying itself. */
+function silentFor(radio: RadioStatus): number {
+  if (!radio.connected || identified(radio) || radio.lastConnectedAt === null) return 0;
+  return Math.floor(Date.now() / 1000) - radio.lastConnectedAt;
+}
+
+/** A normal connect identifies within a second or two; past this, say so. */
+const CONNECTING_GRACE_SECONDS = 20;
+/**
+ * Past this the silence is a fault, not a slow start, and earns the banner:
+ * the console is as read-only as with the radio unplugged.
+ */
+const SILENT_BANNER_SECONDS = 60;
+
+/**
+ * Shown whenever the radio is not connected, or is connected and has not
+ * identified itself for a minute.
  *
  * Amber rather than red on purpose: the console is working, and everything
  * on screen is real. What is lost is freshness and the ability to write.
@@ -87,12 +114,16 @@ function DegradedBanner({ radio }: { radio: RadioStatus }) {
         />
         <div className="min-w-0">
           <p className="font-semibold text-amber-200">
-            Degraded mode — no radio
+            {radio.connected
+              ? "Degraded mode — radio not responding"
+              : "Degraded mode — no radio"}
           </p>
           <p className="mt-1 text-sm text-amber-200/80">
             {disabledByConfig
               ? "Radio support is turned off in the configuration file. "
-              : "The local radio is not connected. "}
+              : radio.connected
+                ? "The serial port is open, but the radio on it has sent nothing and has not identified itself. "
+                : "The local radio is not connected. "}
             Everything below is served from the database and is accurate as of
             each node&rsquo;s last check-in, but nothing is updating and remote
             operations are unavailable.
@@ -131,6 +162,21 @@ function DegradedBanner({ radio }: { radio: RadioStatus }) {
 }
 
 function RadioPill({ radio }: { radio: RadioStatus }) {
+  // Before anything else: an open port with a silent radio on it is not
+  // "connected", and green here once vouched for a radio that never sent a
+  // byte.
+  if (radio.connected && !identified(radio)) {
+    const silent = silentFor(radio);
+    return (
+      <AmberPill
+        title={`${radio.portPath} is open; the radio has not identified itself (${silent}s). Nothing is received until it does.`}
+      >
+        {silent < CONNECTING_GRACE_SECONDS ? "Radio connecting" : "Radio not responding"}
+        <span className="hidden sm:inline">— read-only</span>
+      </AmberPill>
+    );
+  }
+
   if (radio.connected) {
     const tooltip = connectedTooltip(radio);
     const watchdog = radio.watchdog;

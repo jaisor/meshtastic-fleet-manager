@@ -12,6 +12,7 @@ import { AdminOperationRepository } from "./db/repositories/adminOperations.js";
 import { MeshListener } from "./mesh/listener.js";
 import { attachIngest } from "./mesh/ingest.js";
 import { AdminClient } from "./mesh/admin.js";
+import { LocalRadioProbe } from "./mesh/localRadio.js";
 import { CapabilityProber } from "./mesh/capability.js";
 import { NodeEnricher } from "./mesh/enrich.js";
 import { RadioTaskRegistry } from "./mesh/tasks.js";
@@ -66,10 +67,23 @@ async function main(): Promise<void> {
   }
 
   const db = openDatabase(config.database.path);
-  const nodes = new NodeRepository(db, {
-    staleAfter: config.fleet.stale_after,
-    offlineAfter: config.fleet.offline_after,
+  const listener = new MeshListener({
+    portPath: config.serial.port,
+    baud: config.serial.baud,
+    backoff: config.serial.reconnect_backoff,
+    enabled: config.serial.enabled,
+    logger: app.log,
   });
+  // Which node is the local radio comes from the live link, never the
+  // database, so a row cannot outlive the radio it describes.
+  const nodes = new NodeRepository(
+    db,
+    {
+      staleAfter: config.fleet.stale_after,
+      offlineAfter: config.fleet.offline_after,
+    },
+    () => listener.getStatus().localNodeNum,
+  );
   const operations = new AdminOperationRepository(db);
   const users = new UserRepository(db);
   const channels = new ChannelRepository(db);
@@ -80,13 +94,6 @@ async function main(): Promise<void> {
     app.log.warn({ abandoned }, "marked orphaned admin operations as failed");
   }
 
-  const listener = new MeshListener({
-    portPath: config.serial.port,
-    baud: config.serial.baud,
-    backoff: config.serial.reconnect_backoff,
-    enabled: config.serial.enabled,
-    logger: app.log,
-  });
   // Declared before anything that uses the radio, because it is the lock they
   // all share: the enricher defers to it, the prober takes it per probe, and
   // the routes refuse with 409 when they cannot get it.
@@ -110,6 +117,11 @@ async function main(): Promise<void> {
     timeout: config.fleet.admin_probe_timeout,
   });
   admin.attach();
+
+  // Reads the USB radio back in full each time it finishes its config dump,
+  // so a radio that streams but will not answer admin requests is caught at
+  // connect rather than at the first save on the Radio page.
+  new LocalRadioProbe({ listener, admin, nodes, channels, logger: app.log }).attach();
 
   // A task waiting on a radio that just vanished will never be answered;
   // abandon them so the banner clears instead of hanging until timeout.
@@ -152,10 +164,20 @@ async function main(): Promise<void> {
   };
   registerAuthRoutes(app, auth);
 
-  app.log.info(
-    { accounts: users.list().length },
-    "auth ready; the built-in 'admin' account comes from config.yaml",
-  );
+  if (config.auth.enabled) {
+    app.log.info(
+      { accounts: users.list().length },
+      "auth ready; the built-in 'admin' account comes from config.yaml",
+    );
+  } else {
+    // Loud on every boot: a setting left over from a bench session should
+    // not go unnoticed once the console is on a network.
+    app.log.warn(
+      { host: config.server.host, port: config.server.port },
+      "auth.enabled is false: sign-in and roles are off and every request acts as the built-in admin, " +
+        "including radio writes and account management. Anyone who can reach this port has full control.",
+    );
+  }
 
   // Every fleet route behind one hook, so a new route cannot be added
   // unauthenticated by forgetting a decorator.

@@ -138,7 +138,7 @@ export class NodeEnricher {
   }
 
   private async enrich(nodeNum: number): Promise<void> {
-    const device = this.options.listener.getDevice();
+    const device = this.options.listener.getIdentifiedDevice();
     if (!device) return;
 
     // Re-read rather than trusting what was true at discovery: by the time
@@ -257,7 +257,7 @@ export class NodeEnricher {
     nodeNum: number,
     portNum: Protobuf.Portnums.PortNum,
   ): Promise<void> {
-    const device = this.options.listener.getDevice();
+    const device = this.options.listener.getIdentifiedDevice();
     if (!device) return;
 
     try {

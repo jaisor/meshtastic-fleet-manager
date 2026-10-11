@@ -49,7 +49,16 @@ auth:
   #   manager  read everything, and use the radio (probe, remote configuration)
   #   viewer   read-only; never transmits
   #
-  # Exactly one of password / password_hash.
+  # Set false to turn sign-in and roles off entirely. Every request then acts
+  # as the built-in admin -- radio writes, account management and clearing the
+  # database included -- and there is no login page or sign-out. Only for a
+  # console that nothing untrusted can reach; the server logs a warning on
+  # every start while it is off. Accounts already created are kept and apply
+  # again once this is turned back on.
+  enabled: true
+
+  # Exactly one of password / password_hash. Neither is required while
+  # enabled is false, though one may stay here for when it is turned back on.
   #
   # Plaintext is hashed at load time and never written to the database or
   # a log line, but it is still sitting in a file -- prefer password_hash

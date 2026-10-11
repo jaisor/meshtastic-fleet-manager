@@ -5,7 +5,7 @@ import type { NodeRepository } from "../db/repositories/nodes.js";
 import type { ChannelRepository } from "../db/repositories/channels.js";
 import type { DiscoveryRules } from "../config.js";
 import { admits, describeRules, isRestricted } from "./discovery.js";
-import { logNode } from "./nodeId.js";
+import { logNode, toNodeId } from "./nodeId.js";
 import {
   applyConfig,
   applyModuleConfig,
@@ -190,6 +190,12 @@ export function attachIngest(
     localConfigRead = false;
   });
 
+  // Forgotten with the connection, not on `connected`: that fires only once
+  // `wantConfigId` is sent, and `MyNodeInfo` can already have arrived by then.
+  listener.on("disconnected", () => {
+    localNodeNum = null;
+  });
+
   /**
    * Persist the accumulated snapshot, once we know which node it describes.
    *
@@ -244,12 +250,14 @@ export function attachIngest(
 
   listener.on("myNodeInfo", (info: Protobuf.Mesh.MyNodeInfo) => {
     localNodeNum = info.myNodeNum;
-    nodes.upsert({
-      nodeNum: info.myNodeNum,
-      isLocal: true,
-      lastHeardAt: nowSeconds(),
-    });
+    const previous = nodes.recordLocal(info.myNodeNum, nowSeconds());
     logger.info(logNode(info.myNodeNum), "local node identified");
+    if (previous !== null) {
+      logger.warn(
+        { ...logNode(info.myNodeNum), previous: toNodeId(previous) },
+        "a different radio is attached than last time; the previous one is an ordinary fleet member",
+      );
+    }
     // The dump sends MyNodeInfo before the config messages, but if that ever
     // reorders the snapshot would sit in memory with nowhere to go.
     saveLocalConfig();
@@ -283,7 +291,6 @@ export function attachIngest(
       hwModel: enumName(Protobuf.Mesh.HardwareModel, info.user?.hwModel),
       role: enumName(Protobuf.Config.Config_DeviceConfig_Role, info.user?.role),
       publicKey: info.user?.publicKey?.length ? info.user.publicKey : null,
-      isLocal: localNodeNum !== null && info.num === localNodeNum,
       lastHeardAt: resolveTime(info.lastHeard),
       snr: zeroAsNull(info.snr),
       hopsAway: info.hopsAway ?? null,

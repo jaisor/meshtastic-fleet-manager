@@ -17,6 +17,11 @@ export interface SessionUser {
 export interface SessionResponse {
   authenticated: boolean;
   user: SessionUser | null;
+  /**
+   * `auth.enabled: false` in config: every request is the built-in admin,
+   * and there is nothing to sign out of.
+   */
+  authDisabled: boolean;
 }
 
 /** A database-backed account, as the admin page lists it. */
@@ -225,7 +230,11 @@ export interface RadioChannel {
 
 /** Everything the Radio page shows. Served from the database. */
 export interface LocalRadioDetail {
-  /** Null until the radio has connected at least once. */
+  /**
+   * The radio that identified itself on the current connection, and only
+   * that. Null whenever none has -- unplugged, disabled, or connected and
+   * silent -- never a remembered one standing in for it.
+   */
   node: FleetNode | null;
   publicKey: string | null;
   config: NodeRadioConfig | null;
@@ -233,6 +242,12 @@ export interface LocalRadioDetail {
   channels: RadioChannel[];
   telemetry: TelemetryPoint[];
   operations: AdminOperation[];
+  /**
+   * While `node` is null: the node that last identified itself as the local
+   * radio, and when. History, shown as history; it may have been unplugged
+   * long ago and is a fleet member like any other.
+   */
+  lastIdentified: { node: FleetNode; at: number } | null;
 }
 
 /** A LoRa change. Selecting a preset also turns on preset mode. */

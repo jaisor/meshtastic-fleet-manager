@@ -181,8 +181,9 @@ export function registerApiRoutes(
           error: "the local node reports its own settings over USB",
         });
       }
-      if (!deps.listener.getDevice()) {
-        return reply.status(503).send({ error: "local radio is not connected" });
+      const unavailable = deps.listener.unavailableReason();
+      if (unavailable !== null) {
+        return reply.status(503).send({ error: unavailable });
       }
 
       const started = deps.tasks.start({
@@ -254,8 +255,9 @@ export function registerApiRoutes(
       if (!deps.nodes.get(nodeNum)) {
         return reply.status(404).send({ error: "unknown node" });
       }
-      if (!deps.listener.getDevice()) {
-        return reply.status(503).send({ error: "local radio is not connected" });
+      const unavailable = deps.listener.unavailableReason();
+      if (unavailable !== null) {
+        return reply.status(503).send({ error: unavailable });
       }
 
       const node = deps.nodes.get(nodeNum);
@@ -319,8 +321,9 @@ export function registerApiRoutes(
           .status(400)
           .send({ error: "the local node reports its own state over USB" });
       }
-      if (!deps.listener.getDevice()) {
-        return reply.status(503).send({ error: "local radio is not connected" });
+      const unavailable = deps.listener.unavailableReason();
+      if (unavailable !== null) {
+        return reply.status(503).send({ error: unavailable });
       }
 
       const started = deps.tasks.start({
@@ -371,8 +374,9 @@ export function registerApiRoutes(
           .status(400)
           .send({ error: "the local node is configured over USB, not remotely" });
       }
-      if (!deps.listener.getDevice()) {
-        return reply.status(503).send({ error: "local radio is not connected" });
+      const unavailable = deps.listener.unavailableReason();
+      if (unavailable !== null) {
+        return reply.status(503).send({ error: unavailable });
       }
 
       const update = validateConfigUpdate(request.body);

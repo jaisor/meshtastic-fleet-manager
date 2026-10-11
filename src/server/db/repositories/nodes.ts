@@ -17,7 +17,7 @@ interface NodeRow {
   hw_model: string | null;
   role: string | null;
   firmware_version: string | null;
-  is_local: number;
+  last_local_at: number | null;
   first_seen_at: number;
   last_heard_at: number | null;
   snr: number | null;
@@ -105,7 +105,6 @@ export interface NodeUpsert {
   role?: string | null;
   firmwareVersion?: string | null;
   publicKey?: Uint8Array | null;
-  isLocal?: boolean;
   lastHeardAt?: number | null;
   snr?: number | null;
   rssi?: number | null;
@@ -161,7 +160,11 @@ function deriveSignal(snr: number | null, rssi: number | null): SignalQuality {
   return ladder[Math.min(...ranks)] ?? "unknown";
 }
 
-function toFleetNode(row: NodeRow, thresholds: StaleThresholds): FleetNode {
+function toFleetNode(
+  row: NodeRow,
+  thresholds: StaleThresholds,
+  localNodeNum: number | null,
+): FleetNode {
   return {
     nodeNum: row.node_num,
     nodeId: toNodeId(row.node_num),
@@ -173,7 +176,9 @@ function toFleetNode(row: NodeRow, thresholds: StaleThresholds): FleetNode {
     lastHeardAt: row.last_heard_at,
     firstSeenAt: row.first_seen_at,
     state: deriveState(row.last_heard_at, thresholds),
-    isLocal: row.is_local === 1,
+    // Live, never stored: true only for the radio that identified itself on
+    // the current connection. See `NodeRepository` for why.
+    isLocal: localNodeNum !== null && row.node_num === localNodeNum,
     snr: row.snr,
     rssi: row.rssi,
     signal: deriveSignal(row.snr, row.rssi),
@@ -185,10 +190,20 @@ function toFleetNode(row: NodeRow, thresholds: StaleThresholds): FleetNode {
   };
 }
 
+/**
+ * `localNodeNum` is the node number the radio on the cable reported on the
+ * current connection, or null while none has. It is asked, not stored:
+ * "the local radio" is a fact about the live link, and a stored flag
+ * outlives it -- restarted with a different radio attached, or with one that
+ * never answers, the console went on presenting the last radio it had seen
+ * as the one plugged in. Persisted history is `last_local_at`, read only
+ * through `lastLocal()`.
+ */
 export class NodeRepository {
   constructor(
     private readonly db: Db,
     private readonly thresholds: StaleThresholds,
+    private readonly localNodeNum: () => number | null = () => null,
   ) {}
 
   /**
@@ -202,11 +217,11 @@ export class NodeRepository {
         `
         INSERT INTO nodes (
           node_num, short_name, long_name, hw_model, role, firmware_version,
-          public_key, is_local, first_seen_at, last_heard_at, snr, rssi,
+          public_key, first_seen_at, last_heard_at, snr, rssi,
           hops_away, battery_level, voltage
         ) VALUES (
           @nodeNum, @shortName, @longName, @hwModel, @role, @firmwareVersion,
-          @publicKey, @isLocal, @now, @lastHeardAt, @snr, @rssi,
+          @publicKey, @now, @lastHeardAt, @snr, @rssi,
           @hopsAway, @batteryLevel, @voltage
         )
         ON CONFLICT(node_num) DO UPDATE SET
@@ -216,7 +231,6 @@ export class NodeRepository {
           role             = COALESCE(excluded.role, nodes.role),
           firmware_version = COALESCE(excluded.firmware_version, nodes.firmware_version),
           public_key       = COALESCE(excluded.public_key, nodes.public_key),
-          is_local         = MAX(excluded.is_local, nodes.is_local),
           snr              = COALESCE(excluded.snr, nodes.snr),
           rssi             = COALESCE(excluded.rssi, nodes.rssi),
           hops_away        = COALESCE(excluded.hops_away, nodes.hops_away),
@@ -237,7 +251,6 @@ export class NodeRepository {
         role: node.role ?? null,
         firmwareVersion: node.firmwareVersion ?? null,
         publicKey: node.publicKey ? Buffer.from(node.publicKey) : null,
-        isLocal: node.isLocal ? 1 : 0,
         now: nowSeconds(),
         lastHeardAt: node.lastHeardAt ?? null,
         snr: node.snr ?? null,
@@ -252,32 +265,58 @@ export class NodeRepository {
     const rows = this.db
       .prepare<[], NodeRow>(
         `SELECT * FROM nodes
-         ORDER BY is_local DESC, last_heard_at DESC NULLS LAST, node_num`,
+         ORDER BY last_heard_at DESC NULLS LAST, node_num`,
       )
       .all();
-    return rows.map((row) => toFleetNode(row, this.thresholds));
+    return rows.map((row) => toFleetNode(row, this.thresholds, this.localNodeNum()));
   }
 
   /**
-   * The USB-attached radio's own row.
+   * Records that `nodeNum` has just identified itself as the radio on the
+   * cable. History only -- nothing decides from this which node is attached
+   * now; that is `localNodeNum`, from the live connection.
    *
-   * `is_local` is sticky -- once set it is never cleared -- so a swapped
-   * radio leaves two such rows. The connected radio's number wins when
-   * there is one; otherwise the most recently heard local row, which is
-   * what an operator means by "the radio" while it is unplugged.
+   * Returns the node that last did so, when it was a different one, so the
+   * caller can say the radio has been swapped.
    */
-  localNode(connectedNodeNum: number | null): FleetNode | null {
-    if (connectedNodeNum !== null) {
-      const connected = this.get(connectedNodeNum);
-      if (connected) return connected;
-    }
+  recordLocal(nodeNum: number, at: number): number | null {
+    return this.db.transaction(() => {
+      const previous = this.db
+        .prepare<[], { node_num: number }>(
+          `SELECT node_num FROM nodes WHERE last_local_at IS NOT NULL
+           ORDER BY last_local_at DESC LIMIT 1`,
+        )
+        .get();
+      this.db
+        .prepare(
+          `INSERT INTO nodes (node_num, first_seen_at, last_heard_at, last_local_at)
+           VALUES (@nodeNum, @at, @at, @at)
+           ON CONFLICT(node_num) DO UPDATE SET
+             last_local_at = excluded.last_local_at,
+             last_heard_at = MAX(excluded.last_heard_at, COALESCE(nodes.last_heard_at, 0))`,
+        )
+        .run({ nodeNum, at });
+      return previous && previous.node_num !== nodeNum ? previous.node_num : null;
+    })();
+  }
+
+  /**
+   * The node that most recently identified itself as the local radio, and
+   * when. For saying "the last radio seen here was X, on <date>" while none
+   * is identified -- never for presenting X as attached.
+   */
+  lastLocal(): { node: FleetNode; at: number } | null {
     const row = this.db
       .prepare<[], NodeRow>(
-        `SELECT * FROM nodes WHERE is_local = 1
-         ORDER BY last_heard_at DESC NULLS LAST LIMIT 1`,
+        `SELECT * FROM nodes WHERE last_local_at IS NOT NULL
+         ORDER BY last_local_at DESC LIMIT 1`,
       )
       .get();
-    return row ? toFleetNode(row, this.thresholds) : null;
+    if (!row || row.last_local_at === null) return null;
+    return {
+      node: toFleetNode(row, this.thresholds, this.localNodeNum()),
+      at: row.last_local_at,
+    };
   }
 
   /**
@@ -299,7 +338,7 @@ export class NodeRepository {
     const row = this.db
       .prepare<[number], NodeRow>("SELECT * FROM nodes WHERE node_num = ?")
       .get(nodeNum);
-    return row ? toFleetNode(row, this.thresholds) : null;
+    return row ? toFleetNode(row, this.thresholds, this.localNodeNum()) : null;
   }
 
   /**
@@ -329,15 +368,15 @@ export class NodeRepository {
   needingAdminProbe(interval: number, limit: number): FleetNode[] {
     const cutoff = nowSeconds() - interval;
     const rows = this.db
-      .prepare<[number, number], NodeRow>(
+      .prepare<[{ local: number | null; cutoff: number; limit: number }], NodeRow>(
         `SELECT * FROM nodes
-         WHERE is_local = 0
-           AND (admin_checked_at IS NULL OR admin_checked_at < ?)
+         WHERE (@local IS NULL OR node_num != @local)
+           AND (admin_checked_at IS NULL OR admin_checked_at < @cutoff)
          ORDER BY admin_checked_at ASC NULLS FIRST
-         LIMIT ?`,
+         LIMIT @limit`,
       )
-      .all(cutoff, limit);
-    return rows.map((row) => toFleetNode(row, this.thresholds));
+      .all({ local: this.localNodeNum(), cutoff, limit });
+    return rows.map((row) => toFleetNode(row, this.thresholds, this.localNodeNum()));
   }
 
   recordTelemetry(nodeNum: number, point: TelemetryPoint): void {

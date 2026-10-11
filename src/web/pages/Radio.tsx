@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ArrowLeft, Pencil, Plus, RotateCw } from "lucide-react";
 import { api, ApiError } from "../api";
 import {
@@ -11,6 +11,7 @@ import {
   type PskKind,
   type RadioChannel,
   type RadioOccupancy,
+  type RadioStatus,
 } from "../../shared/types";
 import {
   EditableField,
@@ -41,6 +42,8 @@ import { absoluteTime, humanizeEnum, relativeTime } from "../components/format";
  */
 
 const NO_RADIO_HINT = "Unavailable while the local radio is disconnected.";
+const UNIDENTIFIED_HINT =
+  "The radio is connected but has not identified itself yet.";
 
 const BUTTON =
   "inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-3 py-1.5 text-xs text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-neutral-800 disabled:hover:text-neutral-400";
@@ -51,16 +54,26 @@ const INPUT =
 
 export function Radio({
   onBack,
-  radioConnected,
+  onOpenNode,
+  radio,
   canAdminister,
   radioBusy,
 }: {
   onBack: () => void;
-  radioConnected: boolean;
+  onOpenNode: (nodeId: string) => void;
+  /** Null until the first status poll answers; treated as not connected. */
+  radio: RadioStatus | null;
   /** Admins may change the radio; everyone may read it back. */
   canAdminister: boolean;
   radioBusy: RadioOccupancy | null;
 }) {
+  const radioConnected = radio?.connected ?? false;
+  /**
+   * The node number the connected radio reported, or null until it does.
+   * Connected is not the same thing: the port can be open with nothing
+   * answering, and only this number says which node is on the cable.
+   */
+  const radioNodeNum = radioConnected ? (radio?.localNodeNum ?? null) : null;
   const [detail, setDetail] = useState<LocalRadioDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reading, setReading] = useState(false);
@@ -77,9 +90,11 @@ export function Radio({
     }
   }, []);
 
+  // Reloaded when the radio identifies itself, so the page swaps from the
+  // remembered record to the radio actually attached without a refresh.
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, radioNodeNum]);
 
   /** Runs one write, holding the local busy flag and reloading after. */
   const runWrite = useCallback(
@@ -101,7 +116,9 @@ export function Radio({
   // "busy" because it is the more fundamental problem.
   const blockedReason = !radioConnected
     ? NO_RADIO_HINT
-    : ownRequest
+    : radioNodeNum === null
+      ? UNIDENTIFIED_HINT
+      : ownRequest
       ? "Another change to the radio is still in progress."
       : radioBusy
         ? describeOccupancy(radioBusy)
@@ -137,7 +154,12 @@ export function Radio({
   if (error) return <p className="card p-6 text-red-400">{error}</p>;
   if (!detail) return <p className="p-6 text-neutral-500">Loading radio…</p>;
 
-  const node = detail.node;
+  // The server sends only the radio identified on this connection. Checked
+  // here too, because the status poll and this page's own fetch can disagree
+  // for a moment around a reconnect, and that moment is exactly when the
+  // wrong radio would be shown.
+  const node =
+    detail.node !== null && detail.node.nodeNum === radioNodeNum ? detail.node : null;
 
   return (
     <div className="space-y-6">
@@ -157,7 +179,13 @@ export function Radio({
               Local radio
             </p>
             <h1 className="mt-1 text-2xl font-bold tracking-tight text-white">
-              {node?.longName ?? node?.nodeId ?? "Not connected yet"}
+              {node
+                ? (node.longName ?? node.nodeId)
+                : !radio?.enabled && radio !== null
+                  ? "Radio support off"
+                  : radioConnected
+                    ? "Radio not responding"
+                    : "No radio connected"}
             </h1>
             {node && (
               <p className="data mt-1 text-sm text-neutral-500">
@@ -170,11 +198,13 @@ export function Radio({
             <button
               type="button"
               onClick={() => void reRead()}
-              disabled={reading || !radioConnected}
+              disabled={reading || !radioConnected || radioNodeNum === null}
               title={
-                radioConnected
-                  ? "Read identity, settings and channels back from the radio over USB. Nothing is transmitted."
-                  : NO_RADIO_HINT
+                !radioConnected
+                  ? NO_RADIO_HINT
+                  : radioNodeNum === null
+                    ? UNIDENTIFIED_HINT
+                    : "Read identity, settings and channels back from the radio over USB. Nothing is transmitted."
               }
               className={BUTTON}
             >
@@ -195,10 +225,11 @@ export function Radio({
         )}
 
         {node === null ? (
-          <p className="mt-4 text-sm text-neutral-400">
-            The radio has not connected since this database was created. Its
-            identity, settings and channels appear here once it does.
-          </p>
+          <NoRadio
+            radio={radio}
+            lastIdentified={detail.lastIdentified}
+            onOpenNode={onOpenNode}
+          />
         ) : (
           <>
             <dl className="mt-6 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-4">
@@ -290,6 +321,87 @@ export function Radio({
  * form: the radio restarts, and if the rest of the mesh is not on the same
  * preset and slot, it stops hearing every node in the fleet.
  */
+
+/**
+ * What the page says while no radio has identified itself on this
+ * connection. It names the state of the link and stops there: no stored
+ * name, settings or channels, because any of those would describe a radio
+ * that may not be the one attached -- the failure this replaced presented an
+ * NRF52 unplugged ten days earlier as the radio on the cable.
+ *
+ * The last radio that did identify itself is offered as history, dated and
+ * linked to its ordinary node page, never as the current one.
+ */
+function NoRadio({
+  radio,
+  lastIdentified,
+  onOpenNode,
+}: {
+  radio: RadioStatus | null;
+  lastIdentified: LocalRadioDetail["lastIdentified"];
+  onOpenNode: (nodeId: string) => void;
+}) {
+  const port = radio?.portPath ? (
+    <span className="data">{radio.portPath}</span>
+  ) : (
+    "the configured port"
+  );
+
+  let explanation: ReactNode;
+  if (radio === null) {
+    explanation = "Checking the radio’s status…";
+  } else if (!radio.enabled) {
+    explanation = (
+      <>
+        <span className="data">serial.enabled</span> is false in config.yaml, so
+        no radio is used.
+      </>
+    );
+  } else if (radio.connected) {
+    explanation = (
+      <>
+        {port} was opened {relativeTime(radio.lastConnectedAt)}, but the radio on
+        it has not identified itself. Until it does, nothing is known
+        about it &mdash; not its name, its settings, or that it is a working
+        Meshtastic node at all &mdash; and nothing it hears reaches this console.
+        {radio.watchdog?.lastFailureText && (
+          <> Watchdog: {radio.watchdog.lastFailureText}.</>
+        )}
+      </>
+    );
+  } else {
+    explanation = (
+      <>
+        Nothing could be opened on {port}; retrying automatically.
+        {radio.lastErrorText && <> Last error: {radio.lastErrorText}</>}
+      </>
+    );
+  }
+
+  return (
+    <div className="mt-4 space-y-3 text-sm">
+      <p className="text-neutral-400">{explanation}</p>
+      {lastIdentified && (
+        <p className="text-xs text-neutral-500">
+          The last radio to identify itself here was{" "}
+          <button
+            type="button"
+            onClick={() => onOpenNode(lastIdentified.node.nodeId)}
+            className="text-neutral-300 underline decoration-neutral-700 underline-offset-2 transition hover:text-amber-400"
+          >
+            {[lastIdentified.node.shortName, lastIdentified.node.longName]
+              .filter(Boolean)
+              .join(" / ") || lastIdentified.node.nodeId}{" "}
+            <span className="data">({lastIdentified.node.nodeId})</span>
+          </button>
+          , <span title={absoluteTime(lastIdentified.at)}>{relativeTime(lastIdentified.at)}</span>.
+          That is history: it is listed in the fleet like any other node.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function LoRaEditor({
   preset,
   slot,

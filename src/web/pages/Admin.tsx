@@ -13,9 +13,11 @@ import { absoluteTime, relativeTime } from "../components/format";
  */
 export function Admin({
   currentUser,
+  authDisabled,
   onBack,
 }: {
   currentUser: SessionUser;
+  authDisabled: boolean;
   onBack: () => void;
 }) {
   const [users, setUsers] = useState<ManagedUser[] | null>(null);
@@ -58,6 +60,14 @@ export function Admin({
       <h1 className="text-2xl font-bold tracking-tight text-white">
         Administration
       </h1>
+
+      {authDisabled && (
+        <p role="status" className="card border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+          Sign-in is disabled (<span className="data">auth.enabled: false</span>), so
+          everyone who opens this console acts as the built-in admin. The accounts
+          below are kept, and take effect again once sign-in is turned back on.
+        </p>
+      )}
 
       {notice && (
         <p role="status" className="card border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-200">

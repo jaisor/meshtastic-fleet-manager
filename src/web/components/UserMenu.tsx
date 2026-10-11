@@ -23,7 +23,8 @@ export function UserMenu({
 }: {
   user: SessionUser;
   onNavigate: (path: string) => void;
-  onLogout: () => void;
+  /** Null when sign-in is disabled in config and there is nothing to end. */
+  onLogout: (() => void) | null;
 }) {
   const [open, setOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
@@ -107,18 +108,25 @@ export function UserMenu({
             </button>
           )}
 
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setOpen(false);
-              onLogout();
-            }}
-            className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-neutral-300 transition hover:bg-neutral-800 hover:text-amber-400"
-          >
-            <LogOut aria-hidden className="h-4 w-4" />
-            Sign out
-          </button>
+          {onLogout ? (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onLogout();
+              }}
+              className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-neutral-300 transition hover:bg-neutral-800 hover:text-amber-400"
+            >
+              <LogOut aria-hidden className="h-4 w-4" />
+              Sign out
+            </button>
+          ) : (
+            // Signing out would land straight back here, so it is not offered.
+            <p className="border-t border-neutral-800 px-3 py-2 text-xs text-neutral-500">
+              Sign-in is disabled in config.yaml (<span className="data">auth.enabled</span>).
+            </p>
+          )}
         </div>
       )}
     </div>

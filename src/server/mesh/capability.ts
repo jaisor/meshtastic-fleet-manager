@@ -66,7 +66,7 @@ export class CapabilityProber {
 
   async sweep(): Promise<void> {
     if (this.running || this.stopped) return;
-    if (!this.options.listener.getDevice()) return;
+    if (!this.options.listener.getIdentifiedDevice()) return;
 
     this.running = true;
     try {
@@ -79,7 +79,7 @@ export class CapabilityProber {
         if (this.stopped) break;
         // The radio can vanish mid-sweep; stop rather than log a run of
         // misleading "unreachable" verdicts caused by our own end.
-        if (!this.options.listener.getDevice()) break;
+        if (!this.options.listener.getIdentifiedDevice()) break;
 
         const started = this.options.tasks.start({
           kind: "probe",

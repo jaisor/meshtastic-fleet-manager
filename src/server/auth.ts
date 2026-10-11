@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AppConfig } from "./config.js";
 import { hashPassword, verifyPassword } from "./config.js";
 import type { UserRepository } from "./db/repositories/users.js";
-import type { SessionUser } from "../shared/types.js";
+import type { SessionResponse, SessionUser } from "../shared/types.js";
 import {
   BUILT_IN_ADMIN_USERNAME,
   canAdminister,
@@ -95,6 +95,22 @@ export interface AuthContext {
   users: UserRepository;
 }
 
+/**
+ * Who every request is with `auth.enabled: false`: the built-in admin, so the
+ * console behaves exactly as if that account had signed in. One constant
+ * returned from `currentUser`, which every guard reads through, rather than a
+ * bypass in each guard -- a guard that forgot the bypass would 401 instead.
+ */
+const AUTH_DISABLED_USER: SessionUser = {
+  username: BUILT_IN_ADMIN_USERNAME,
+  role: "admin",
+  builtIn: true,
+};
+
+export function authDisabled(auth: AuthContext): boolean {
+  return !auth.config.auth.enabled;
+}
+
 function readSessionId(request: FastifyRequest): string | undefined {
   const raw = request.cookies[COOKIE_NAME];
   if (!raw) return undefined;
@@ -106,6 +122,7 @@ export function currentUser(
   request: FastifyRequest,
   auth: AuthContext,
 ): SessionUser | null {
+  if (authDisabled(auth)) return AUTH_DISABLED_USER;
   return auth.store.get(readSessionId(request));
 }
 
@@ -172,7 +189,8 @@ function authenticate(
   password: string,
 ): SessionUser | null {
   if (username.toLowerCase() === BUILT_IN_ADMIN_USERNAME) {
-    if (!verifyPassword(password, auth.config.passwordHash)) return null;
+    const hash = auth.config.passwordHash;
+    if (hash === null || !verifyPassword(password, hash)) return null;
     return { username: BUILT_IN_ADMIN_USERNAME, role: "admin", builtIn: true };
   }
 
@@ -197,14 +215,19 @@ export function registerAuthRoutes(
   app: FastifyInstance,
   auth: AuthContext,
 ): void {
-  app.get("/api/session", async (request) => {
+  app.get("/api/session", async (request): Promise<SessionResponse> => {
     const user = currentUser(request, auth);
-    return { authenticated: user !== null, user };
+    return { authenticated: user !== null, user, authDisabled: authDisabled(auth) };
   });
 
   app.post<{ Body: { username?: string; password?: string } }>(
     "/api/session",
     async (request, reply) => {
+      // Already "signed in"; a stale login form submitting is not an error.
+      if (authDisabled(auth)) {
+        return { authenticated: true, user: AUTH_DISABLED_USER, authDisabled: true };
+      }
+
       const username = request.body?.username?.trim();
       const password = request.body?.password;
 
@@ -234,7 +257,7 @@ export function registerAuthRoutes(
           signed: true,
           maxAge: auth.config.server.session_ttl,
         })
-        .send({ authenticated: true, user });
+        .send({ authenticated: true, user, authDisabled: false });
     },
   );
 
@@ -242,6 +265,10 @@ export function registerAuthRoutes(
     auth.store.destroy(readSessionId(request));
     return reply
       .clearCookie(COOKIE_NAME, { path: "/" })
-      .send({ authenticated: false, user: null });
+      .send({
+        authenticated: authDisabled(auth),
+        user: authDisabled(auth) ? AUTH_DISABLED_USER : null,
+        authDisabled: authDisabled(auth),
+      });
   });
 }

@@ -179,4 +179,18 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    name: "006_local_radio_is_live",
+    sql: `
+      -- Which node is on the USB cable is a fact about the live connection,
+      -- not something to remember. A stored flag outlived the radio it
+      -- described: after a swap, the old radio was presented as attached
+      -- while the new one sat silent, and stayed hidden from the fleet.
+      -- What is worth keeping is history -- when a node last identified
+      -- itself as the local radio -- and that is all this column says.
+      ALTER TABLE nodes ADD COLUMN last_local_at INTEGER;
+      UPDATE nodes SET last_local_at = last_heard_at WHERE is_local = 1;
+      ALTER TABLE nodes DROP COLUMN is_local;
+    `,
+  },
 ];

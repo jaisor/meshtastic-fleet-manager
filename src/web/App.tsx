@@ -8,7 +8,7 @@ import type {
 } from "../shared/types";
 import { canAdminister, canOperateRadio } from "../shared/roles";
 import { api, ApiError } from "./api";
-import { useRoute } from "./router";
+import { nodePath, useRoute } from "./router";
 import { Backdrop } from "./components/Backdrop";
 import { Layout } from "./components/Layout";
 import { Admin } from "./pages/Admin";
@@ -32,6 +32,8 @@ type Auth = "checking" | "in" | "out";
 export function App() {
   const [auth, setAuth] = useState<Auth>("checking");
   const [user, setUser] = useState<SessionUser | null>(null);
+  /** `auth.enabled: false`: everyone is the built-in admin, no sign-out. */
+  const [authDisabled, setAuthDisabled] = useState(false);
   const [radio, setRadio] = useState<RadioStatus | null>(null);
   const [tasks, setTasks] = useState<RadioTask[]>([]);
   const [radioBusy, setRadioBusy] = useState<RadioOccupancy | null>(null);
@@ -43,6 +45,7 @@ export function App() {
       .getSession()
       .then((session) => {
         setUser(session.user);
+        setAuthDisabled(session.authDisabled);
         setAuth(session.authenticated ? "in" : "out");
       })
       .catch(() => setAuth("out"));
@@ -155,21 +158,26 @@ export function App() {
         user={user}
         onCancelTask={(task) => void cancelTask(task)}
         onNavigate={navigate}
-        onLogout={() => void logout()}
+        onLogout={authDisabled ? null : () => void logout()}
       >
         {route.name === "admin" ? (
           // A deep link to /admin is reachable by anyone signed in, so the
           // route refuses rather than rendering a shell whose every request
           // 403s. The server is still the actual guard.
           canAdminister(user.role) ? (
-            <Admin currentUser={user} onBack={() => navigate("/")} />
+            <Admin
+              currentUser={user}
+              authDisabled={authDisabled}
+              onBack={() => navigate("/")}
+            />
           ) : (
             <NotPermitted role={user.role} onBack={() => navigate("/")} />
           )
         ) : route.name === "radio" ? (
           <Radio
             onBack={() => navigate("/")}
-            radioConnected={radio?.connected ?? false}
+            onOpenNode={(nodeId) => navigate(nodePath(nodeId))}
+            radio={radio}
             canAdminister={canAdminister(user.role)}
             radioBusy={radioBusy}
           />
@@ -187,8 +195,9 @@ export function App() {
             //
             // Null until the first status poll lands; treating "unknown" as
             // "no radio" keeps mesh controls disabled until we actually know,
-            // rather than offering a button that 503s.
-            radioConnected={radio?.connected ?? false}
+            // rather than offering a button that 503s. Identified, not merely
+            // open: a radio that never answers cannot carry a probe either.
+            radioConnected={(radio?.connected ?? false) && radio?.localNodeNum != null}
             canOperate={canOperateRadio(user.role)}
             radioBusy={radioBusy}
             onLocal={openRadio}

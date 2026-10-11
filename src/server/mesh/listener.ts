@@ -84,9 +84,32 @@ export class MeshListener extends EventEmitter {
     return { ...this.status };
   }
 
-  /** The connected device, or null while disconnected. */
+  /**
+   * The open device, or null while disconnected -- including while the radio
+   * on it has not answered at all. For the watchdog, whose job is exactly
+   * that state; everything that wants to *use* the radio asks
+   * `getIdentifiedDevice()` instead.
+   */
   getDevice(): MeshDevice | null {
     return this.status.connected ? this.device : null;
+  }
+
+  /**
+   * The device, once the radio on it has reported its node number. An open
+   * port is not a working radio: one that never sends a byte looks exactly
+   * like this from the OS, and work sent there just times out.
+   */
+  getIdentifiedDevice(): MeshDevice | null {
+    return this.status.localNodeNum !== null ? this.getDevice() : null;
+  }
+
+  /** Why the radio cannot be used right now, or null if it can. */
+  unavailableReason(): string | null {
+    if (!this.getDevice()) return "local radio is not connected";
+    if (this.status.localNodeNum === null) {
+      return "the radio is connected but has not identified itself";
+    }
+    return null;
   }
 
   /**
@@ -135,6 +158,10 @@ export class MeshListener extends EventEmitter {
     this.device = null;
     this.status.connected = false;
     this.status.configured = false;
+    // The next connection may be a different radio. Keeping the number would
+    // let admin requests go out addressed as the old one, and the UI present
+    // the old radio as connected, until the new one identifies itself.
+    this.status.localNodeNum = null;
     if (transport) {
       try {
         await transport.disconnect();
@@ -251,6 +278,10 @@ export class MeshListener extends EventEmitter {
   private wireEvents(device: MeshDevice): void {
     device.events.onDeviceStatus.subscribe((status) => {
       this.status.configured = status === Types.DeviceStatusEnum.DeviceConfigured;
+      // The radio's `configCompleteId`: its whole dump has arrived, so its
+      // node number is known. `connected` cannot stand in for this --
+      // `configure()` resolves once `wantConfigId` is sent, before any reply.
+      if (this.status.configured) this.emit("configured", device);
 
       if (
         status === Types.DeviceStatusEnum.DeviceDisconnected &&
@@ -372,7 +403,20 @@ function openSerialPort(
         reject(cause);
         return;
       }
-      resolve(port);
+      // Raise both modem lines, as a Linux tty open, pyserial and Web Serial
+      // all do. On Windows the binding raises DTR but leaves RTS down unless
+      // hardware flow control is on. On an ESP32's USB-Serial/JTAG, DTR up
+      // with RTS down drives GPIO0 low, so any reboot in that state -- a
+      // crash, or the one after a LoRa change -- lands in the ROM downloader
+      // instead of Meshtastic. Both up is the auto-reset logic's neutral
+      // state. The binding sets RTS before DTR and DTR is already up, so
+      // this passes through no reset pulse on the way.
+      port.set({ dtr: true, rts: true }, (setCause) => {
+        if (setCause) {
+          logger.warn({ err: setCause.message }, "could not raise DTR/RTS on the serial port");
+        }
+        resolve(port);
+      });
     });
   });
 }
