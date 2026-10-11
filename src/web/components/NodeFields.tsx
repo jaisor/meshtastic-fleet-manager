@@ -408,6 +408,10 @@ export function OperationLog({
  * looking for a control that is not there. It is also brief and self-clearing,
  * which is the useful thing to say.
  */
+/** Reason shown on every control that would need the mesh. */
+export const NO_RADIO_HINT =
+  "Unavailable while the local radio is disconnected — these actions go out over the mesh.";
+
 export function describeOccupancy(busy: RadioOccupancy): string {
   const where = busy.nodeName ?? busy.nodeId;
   if (busy.background) {

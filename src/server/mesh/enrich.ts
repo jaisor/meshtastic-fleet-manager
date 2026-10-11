@@ -1,6 +1,7 @@
-import { Protobuf, Types } from "@meshtastic/core";
+import { Protobuf } from "@meshtastic/core";
 import type { FastifyBaseLogger } from "fastify";
 import type { NodeRepository } from "../db/repositories/nodes.js";
+import { buildToRadio, newPacketId } from "./admin.js";
 import type { MeshListener } from "./listener.js";
 import { logNode } from "./nodeId.js";
 import { TaskCancelledError, type RadioTaskRegistry } from "./tasks.js";
@@ -56,6 +57,13 @@ const MANUAL_SPACING_MS = 1_200;
 
 /** How long a manual refresh waits for answers before reporting what it got. */
 const MANUAL_WAIT_MS = 20_000;
+
+/**
+ * Longest a request may sit in the library's send queue before we stop
+ * watching for it to be written. The queue writes one packet per 200 ms, so
+ * this is only reached when the link itself has stopped taking writes.
+ */
+const WRITE_WAIT_MS = 5_000;
 
 /** What a manual refresh managed to collect. */
 export interface RefreshOutcome {
@@ -212,13 +220,17 @@ export class NodeEnricher {
     listener.on("position", onPosition);
 
     try {
-      await this.request(nodeNum, Protobuf.Portnums.PortNum.NODEINFO_APP);
+      await this.request(nodeNum, Protobuf.Portnums.PortNum.NODEINFO_APP, signal);
       await delay(MANUAL_SPACING_MS, signal);
-      await this.request(nodeNum, Protobuf.Portnums.PortNum.TELEMETRY_APP);
+      await this.request(nodeNum, Protobuf.Portnums.PortNum.TELEMETRY_APP, signal);
       await delay(MANUAL_SPACING_MS, signal);
-      await this.request(nodeNum, Protobuf.Portnums.PortNum.POSITION_APP);
+      await this.request(nodeNum, Protobuf.Portnums.PortNum.POSITION_APP, signal);
 
       await new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new TaskCancelledError());
+          return;
+        }
         const timer = setTimeout(resolve, MANUAL_WAIT_MS);
         settle = () => {
           clearTimeout(timer);
@@ -252,40 +264,77 @@ export class NodeEnricher {
    * `requestPosition` uses. `wantAck` is off: an acknowledgement would cost
    * another transmission to tell us something we do not act on, since a
    * node that never answers is simply left as it was.
+   *
+   * **Not sent with `sendPacket`.** That resolves only when the library's
+   * queue sees a routing ACK for the packet, and with `wantAck` off none ever
+   * comes: the node answers with data, not an ACK. Each request then sat out
+   * the queue's 60s timeout, so a manual refresh held the radio lock for
+   * about three and a half minutes against a 25s budget, even after the node
+   * had answered. Instead the id is chosen here, the send is not awaited,
+   * and the queue entry is released once written -- as `AdminClient` and the
+   * watchdog already do, for the same reason.
    */
   private async request(
     nodeNum: number,
     portNum: Protobuf.Portnums.PortNum,
+    signal?: AbortSignal,
   ): Promise<void> {
+    if (signal?.aborted) throw new TaskCancelledError();
     const device = this.options.listener.getIdentifiedDevice();
-    if (!device) return;
+    const local = this.options.listener.getStatus().localNodeNum;
+    if (!device || local === null) return;
 
-    try {
-      await device.sendPacket(
-        new Uint8Array(),
-        portNum,
-        nodeNum,
-        Types.ChannelNumber.Primary,
-        false, // wantAck
-        true, // wantResponse
-      );
-    } catch (cause) {
-      // Never fatal. The node keeps whatever it had, and its next broadcast
-      // fills the gaps in anyway.
+    const id = newPacketId();
+    const bytes = buildToRadio({
+      from: local,
+      to: nodeNum,
+      id,
+      portnum: portNum,
+      payload: new Uint8Array(),
+      wantAck: false,
+      wantResponse: true,
+    });
+
+    let written = false;
+    device.sendRaw(bytes, id).catch((cause: unknown) => {
+      // Releasing the entry below makes the queue's own wait throw, and its
+      // 60s timeout rejects with a plain object; neither is news. A write
+      // that never happened is, and is never fatal: the node keeps what it
+      // had and its next broadcast fills the gaps.
+      if (written || !(cause instanceof Error)) return;
       this.options.logger.warn(
-        {
-          ...logNode(nodeNum),
-          port: Protobuf.Portnums.PortNum[portNum],
-          err: (cause as Error).message,
-        },
+        { ...logNode(nodeNum), port: Protobuf.Portnums.PortNum[portNum], err: cause.message },
         "enrichment request failed",
       );
+    });
+
+    // Wait only until it is on the wire, then drop it from the queue so the
+    // library neither holds it for a minute nor logs a timeout for it.
+    const deadline = Date.now() + WRITE_WAIT_MS;
+    while (Date.now() < deadline) {
+      const entry = device.queue.getState().find((item) => item.id === id);
+      if (!entry || entry.sent) {
+        written = true;
+        device.queue.remove(id);
+        return;
+      }
+      await delay(50, signal);
     }
+    this.options.logger.warn(
+      { ...logNode(nodeNum), port: Protobuf.Portnums.PortNum[portNum] },
+      "enrichment request not written to the radio in time",
+    );
   }
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
+    // An already-aborted signal never fires "abort" again, so without this a
+    // cancel that landed mid-request was ignored until the next timeout ran out.
+    if (signal?.aborted) {
+      reject(new TaskCancelledError());
+      return;
+    }
     const timer = setTimeout(resolve, ms);
     signal?.addEventListener(
       "abort",

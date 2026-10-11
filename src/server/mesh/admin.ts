@@ -134,6 +134,34 @@ export function buildAdminToRadio(input: {
   message: AdminMessage;
   wantAck: boolean;
 }): Uint8Array {
+  return buildToRadio({
+    from: input.from,
+    to: input.to,
+    id: input.id,
+    portnum: ADMIN_PORT,
+    payload: toBinary(Protobuf.Admin.AdminMessageSchema, input.message),
+    wantAck: input.wantAck,
+    wantResponse: true,
+  });
+}
+
+/**
+ * Any decoded MeshPacket in its ToRadio envelope, with a caller-chosen id.
+ *
+ * For every send whose answer is not a routing ACK. `sendPacket` resolves
+ * only on an ACK for its packet, or rejects after the queue's 60s timeout --
+ * so a request sent with `wantAck: false`, or one answered by data rather
+ * than by an ACK, holds whoever awaits it for the full minute.
+ */
+export function buildToRadio(input: {
+  from: number;
+  to: number;
+  id: number;
+  portnum: Protobuf.Portnums.PortNum;
+  payload: Uint8Array;
+  wantAck: boolean;
+  wantResponse: boolean;
+}): Uint8Array {
   const packet = create(Protobuf.Mesh.MeshPacketSchema, {
     from: input.from,
     to: input.to,
@@ -143,9 +171,9 @@ export function buildAdminToRadio(input: {
     payloadVariant: {
       case: "decoded",
       value: {
-        portnum: ADMIN_PORT,
-        payload: toBinary(Protobuf.Admin.AdminMessageSchema, input.message),
-        wantResponse: true,
+        portnum: input.portnum,
+        payload: input.payload,
+        wantResponse: input.wantResponse,
       },
     },
   });

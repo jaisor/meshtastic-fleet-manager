@@ -41,7 +41,8 @@ and remotely reconfiguring them.
 **UI surfaces**
 
 - `/login` — password form.
-- `/` — fleet list: node ID, short name, long name, last check-in, admin-capable badge.
+- `/` — fleet list: node ID, short name, long name, last check-in, admin-capable badge,
+  and a per-row refresh (managers and admins) that asks that node to report in now.
   The USB-attached radio is **not** listed; it is the instrument, not a fleet member.
 - `/nodes/:id` — detail: full identity, telemetry history, position, link quality, and
   the remote-configuration form. The local radio's id redirects to `/radio`.
@@ -782,6 +783,19 @@ bloom over near-black.
   everything including position regardless of what is stored, because the point of pressing
   it is to learn what is true now; it waits for the replies so it can report what actually
   came back, and registers a task so the wait is visible and cancellable.
+  **The requests are not sent with `sendPacket`.** It resolves only when the library's
+  queue sees a routing ACK for the packet, and these go out with `wantAck: false` and are
+  answered with data, so every one sat out the queue's 60s timeout. A manual refresh
+  therefore held the radio lock for about 3.5 minutes against its 25s budget, even
+  after the node had answered, and the console looked stuck. `request` now builds the
+  packet with `buildToRadio` (shared with `AdminClient`) and its own id, does not await
+  `sendRaw`, and removes the queue entry once it is written, which is the same reason and
+  remedy as §5 and the watchdog. Its waits check `signal.aborted` first, because an
+  already-aborted signal never fires `abort` again, and a cancel landing mid-request was
+  ignored until the next timeout ran out.
+  Verified (2026-10-11) with a real `MeshDevice` over a stub transport playing the node:
+  answered in 3.4s with all three reported; silent in 23.2s, inside budget; cancel
+  immediate; queue empty afterwards; no library timeout warnings.
   **`enqueue` defers its drain by a tick on purpose.** The ingest admits a node *before* it
   writes the row, so draining inline looked the node up, found nothing and dropped it
   silently — a bug a unit test missed because it had seeded the row first.
@@ -820,6 +834,21 @@ bloom over near-black.
   which needs identical rights and is four round trips, so it would burn four timeouts to
   report nothing. Each non-capable verdict gets its own advice (`CAPABILITY_ADVICE`), and the
   route out of all of them is the probe, which stays ungated because finding out is its job.
+  **The fleet list has the same refresh on every row** (`pages/Fleet.tsx`), calling the
+  same route, so the lock, the task and the 409 are the server's as before. The row is an
+  `<li class="card">` holding the link and a sibling button, because a button inside an
+  `<a>` is invalid and its click would navigate. One `blockedReason` disables every row's
+  button: the radio not identified, then this page's own request in flight (`radioBusy`
+  arrives by poll, so without it the other rows look free until the next poll), then
+  `radioBusy`. On success the row is replaced with the node the route read back, and a
+  note under it says what answered ("Updated: identity, metrics.", or "No answer…") for
+  10s. Viewers see no button. Verified (2026-10-11) in headless Edge with `/api/status`
+  rewritten to report an identified radio and the refresh answered by the script: all
+  eight enabled while idle; during a refresh only the clicked row spins and the other
+  seven are disabled with the reason; the note appears and every button re-enables;
+  with a background sweep reported in `radioBusy` all are disabled with its description,
+  and clicking one sends nothing; no console errors and no overflow at 1280px or 390px.
+  The no-radio state was not exercised in the browser.
   **Refresh from node is deliberately *not* gated** — it asks for NodeInfo, telemetry and
   position with `wantResponse`, which any node answers whatever our admin rights, so requiring
   a verdict there would withhold a working feature.
@@ -855,6 +884,12 @@ bloom over near-black.
   is busy doing X" is more useful than a silent wait. The check and the insert are one
   synchronous block, which is what makes it a lock — Node runs one thing at a time, so two
   requests cannot both see it free.
+  **A task's `timeoutSeconds` is enforced as a backstop** at twice its value: the
+  registry aborts it, releases the lock, and logs at error. Every operation has its own
+  timeout well inside its budget; this exists because one that never settles otherwise
+  locks every control until a restart, which an unawaited library promise once did.
+  The delay is clamped to setTimeout's ~24.8-day limit, because the capability sweep
+  passes its probe interval as its budget.
   **Routes answer 409, not 503.** 503 means "there is no radio"; 409 means "the radio is here
   and busy", and those have different remedies. The message names the occupant.
   **Three radio users, three different relationships to the lock**, and the asymmetry is the

@@ -17,6 +17,7 @@ import { CapabilityProber } from "./mesh/capability.js";
 import { NodeEnricher } from "./mesh/enrich.js";
 import { RadioTaskRegistry } from "./mesh/tasks.js";
 import { RadioWatchdog } from "./mesh/watchdog.js";
+import { logNode } from "./mesh/nodeId.js";
 import { registerAuthRoutes, requireSession, SessionStore } from "./auth.js";
 import { UserRepository } from "./db/repositories/users.js";
 import { registerApiRoutes } from "./routes/api.js";
@@ -97,7 +98,13 @@ async function main(): Promise<void> {
   // Declared before anything that uses the radio, because it is the lock they
   // all share: the enricher defers to it, the prober takes it per probe, and
   // the routes refuse with 409 when they cannot get it.
-  const tasks = new RadioTaskRegistry();
+  const tasks = new RadioTaskRegistry({
+    onOverrun: (task, heldSeconds) =>
+      app.log.error(
+        { ...logNode(task.nodeNum), kind: task.kind, heldSeconds, budget: task.timeoutSeconds },
+        "radio task overran its budget; abandoned and the radio released",
+      ),
+  });
 
   const enricher = new NodeEnricher({
     listener,

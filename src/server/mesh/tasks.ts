@@ -57,12 +57,37 @@ export class TaskCancelledError extends Error {
   }
 }
 
+/**
+ * A task still holding the radio at this multiple of its own budget is
+ * abandoned and the lock released. A backstop, not a timeout: every
+ * operation has its own, well inside its budget. It exists because the
+ * radio is exclusive -- one operation that never settles locks every control
+ * in the console until a restart, which is what an unawaited library promise
+ * once did to a node refresh.
+ */
+const OVERRUN_FACTOR = 2;
+
+/** The longest delay `setTimeout` honors. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+export interface RadioTaskRegistryOptions {
+  /** Told when a task overran and was abandoned, so it can be logged. */
+  onOverrun?: (task: RadioTask, heldSeconds: number) => void;
+}
+
 export class RadioTaskRegistry {
   private readonly entries = new Map<
     number,
-    { task: RadioTask; controller: AbortController; background: boolean }
+    {
+      task: RadioTask;
+      controller: AbortController;
+      background: boolean;
+      deadline: NodeJS.Timeout;
+    }
   >();
   private nextId = 1;
+
+  constructor(private readonly options: RadioTaskRegistryOptions = {}) {}
 
   /**
    * Takes the radio, or returns null because something else already has it.
@@ -87,10 +112,24 @@ export class RadioTaskRegistry {
       startedAt: Math.floor(Date.now() / 1000),
       timeoutSeconds: input.timeoutSeconds,
     };
+    // Aborts and releases at once rather than waiting for `finish`: the
+    // operation being abandoned is, by definition, one that is not finishing.
+    // A late `finish` is harmless.
+    const deadline = setTimeout(() => {
+      if (!this.entries.has(task.id)) return;
+      controller.abort();
+      this.entries.delete(task.id);
+      this.options.onOverrun?.(task, Math.floor(Date.now() / 1000) - task.startedAt);
+      // Clamped: setTimeout fires at once past 2^31-1 ms (~24.8 days), and
+      // the capability sweep passes its probe interval as its budget.
+    }, Math.min(input.timeoutSeconds * OVERRUN_FACTOR * 1000, MAX_TIMER_MS));
+    deadline.unref();
+
     this.entries.set(task.id, {
       task,
       controller,
       background: input.background === true,
+      deadline,
     });
     return { task, signal: controller.signal };
   }
@@ -121,6 +160,8 @@ export class RadioTaskRegistry {
 
   /** Always call this, cancelled or not, or the banner never goes away. */
   finish(id: number): void {
+    const entry = this.entries.get(id);
+    if (entry) clearTimeout(entry.deadline);
     this.entries.delete(id);
   }
 

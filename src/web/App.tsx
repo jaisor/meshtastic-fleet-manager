@@ -203,7 +203,13 @@ export function App() {
             onLocal={openRadio}
           />
         ) : (
-          <Fleet onOpen={navigate} discovery={discovery} />
+          <Fleet
+            onOpen={navigate}
+            discovery={discovery}
+            radioConnected={(radio?.connected ?? false) && radio?.localNodeNum != null}
+            canOperate={canOperateRadio(user.role)}
+            radioBusy={radioBusy}
+          />
         )}
       </Layout>
     </>

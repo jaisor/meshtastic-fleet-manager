@@ -17,6 +17,7 @@ import {
   PublicKey,
   describeOccupancy,
   TelemetryHistory,
+  NO_RADIO_HINT,
 } from "../components/NodeFields";
 import { SignalDot } from "../components/SignalDot";
 import { StatusDot } from "../components/StatusDot";
@@ -413,9 +414,6 @@ const CAPABILITY_ADVICE: Record<AdminCapability, string> = {
     "Admin rights for this node have not been established yet, so its settings are not editable. Probe it to find out whether it accepts administration from the local node.",
 };
 
-/** Reason shown on every control that would need the mesh. */
-const NO_RADIO_HINT =
-  "Unavailable while the local radio is disconnected — these actions go out over the mesh.";
 
 /**
  * Admin access and the log of what has been sent to this node.
