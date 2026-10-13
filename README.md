@@ -370,7 +370,7 @@ llm:
 
 | Provider | Cost | Notes |
 | --- | --- | --- |
-| `google` | Free tier with an [AI Studio key](https://aistudio.google.com/apikey), no card | The default model, `gemini-2.5-flash-lite`, is free-tier eligible. On the free tier Google may use what is sent to improve its products. |
+| `google` | Free tier with an [AI Studio key](https://aistudio.google.com/apikey), no card | The default model is `gemini-3.5-flash-lite`, Google's smallest current one. On the free tier Google may use what is sent to improve its products. |
 | `anthropic` | Pay as you go | Set `model`, e.g. `claude-haiku-5-5`. |
 | `openai` | Pay as you go | Set `model`. |
 | `openai_compatible` | Free with a local model | Ollama, LM Studio, vLLM or OpenRouter via `base_url`. Works with no internet. |

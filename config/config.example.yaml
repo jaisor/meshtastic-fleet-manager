@@ -303,11 +303,11 @@ llm:
   provider: google
 
   # Required for every provider except google, which defaults to
-  # gemini-2.5-flash-lite (free-tier eligible). A small, cheap model is the
+  # gemini-3.5-flash-lite, its smallest current model. A small, cheap model is the
   # right choice: each question is one short structured answer. Check the
   # provider's model list for current names, e.g. claude-haiku-5-5 for
   # anthropic, or "llama3.2" for a local Ollama.
-  # model: gemini-2.5-flash-lite
+  # model: gemini-3.5-flash-lite
 
   # The key, from at most one of these. With none set, the provider's usual
   # environment variable is read: GOOGLE_GENERATIVE_AI_API_KEY,

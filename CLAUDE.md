@@ -1253,8 +1253,16 @@ request body, and the request carries only the instructions, the schema and the 
 combines with the search box, shows the rate-limit error with the draft kept, clears;
 the viewer sees no box; no overflow, console or HTTP errors. The evaluator's edge cases
 (never heard, external power, firmware ordering, sanitizer) are checked by a throwaway
-script. **Not verified against any real provider**: which of Gemini, Claude, OpenAI or a
-local model fills the schema reliably, and the real token count per question.
+script.
+**Against real Gemini** (2026-10-12), only lightly: the original default,
+`gemini-2.5-flash-lite`, answered every question with HTTP 404, because Google had closed
+it to new users ("no longer available to new users... use models/gemini-3.5-flash-lite").
+The error mapping used to read any 404 as "unknown model" and drop Google's message; it now
+passes the message on. The default is `gemini-3.5-flash-lite`, pinned rather than the
+`-latest` alias so the model under the schema does not change unannounced. It answered
+three questions with correct filters: "nodes with a low battery", "routers not heard in 2
+days" and "the 2 nodes with the highest battery". **Not verified**: Claude, OpenAI or a
+local model, wider phrasing, and the real token count per question.
 
 **An ESP32-S3 on Windows (COM16, `303A:1001`, the built-in USB-Serial/JTAG) sent nothing
 at all** (2026-10-10). The port opened and our `wantConfigId` went out well-formed
@@ -1334,8 +1342,9 @@ Next, roughly in order of value:
 - Point the MQTT feed at a real broker with real gateways, and check the telemetry field
   names against what current firmware publishes. Protobuf (`/2/e/`) payloads, including
   decrypting with a channel key, are the obvious next format.
-- Try the assistant against a real Gemini free-tier key and a local Ollama model, and
-  record which phrasings each gets wrong.
+- Try the assistant against a local Ollama model, and more phrasings against Gemini, and
+  record which phrasings each gets wrong. Expect Google to retire the pinned default
+  again; the 404 now names the replacement.
 - A remedy for air silence. Reconnecting cannot help a hung transceiver; an admin
   `rebootSeconds` to the local node would. It needs to be opt-in, taken under the radio
   lock, and limited to once per silent spell, since on a quiet mesh it would otherwise

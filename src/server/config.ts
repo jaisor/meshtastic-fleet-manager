@@ -269,11 +269,16 @@ export interface AssistantConfig {
 }
 
 /**
- * Free-tier eligible on Google AI Studio as of 2026-10, and the cheapest of
- * Google's paid rates if billing is on. Only Google gets a default: the
- * others have no free tier, so choosing a model there is choosing a price.
+ * Google's smallest current model. Only Google gets a default: the others
+ * have no free tier, so choosing a model there is choosing a price.
+ *
+ * Pinned rather than the `gemini-flash-lite-latest` alias, so the model under
+ * the schema does not change without anyone deciding it should. The cost is
+ * that a pin goes stale: `gemini-2.5-flash-lite` was the default until Google
+ * closed it to new users (2026-10-12, a 404 naming this one as the
+ * replacement).
  */
-const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash-lite";
+const DEFAULT_GOOGLE_MODEL = "gemini-3.5-flash-lite";
 
 /** What each provider's own SDK reads when no key is configured. */
 const CONVENTIONAL_KEY_ENV: Record<Exclude<LlmProvider, "openai_compatible">, string> = {

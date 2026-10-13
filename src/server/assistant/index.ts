@@ -272,9 +272,17 @@ function classify(cause: unknown, config: AssistantConfig): AssistantError {
       );
     }
     if (status === 404) {
+      // Not always an unknown name: Google answers 404 for a model it has
+      // retired for new users too, and its message names the replacement.
+      // That message is the useful part, so it is passed on rather than
+      // replaced with a guess. It comes from the response body; the key
+      // travels in a request header and is not in it.
+      const detail = inner.message.trim().slice(0, 300);
       return new AssistantError(
         502,
-        `${config.provider} does not know the model "${config.model}". Check llm.model in the server's config.`,
+        `${config.provider} cannot use the model "${config.model}" (HTTP 404)` +
+          (detail ? `: ${detail}` : ".") +
+          " Set llm.model in the server's config.",
       );
     }
     return new AssistantError(
