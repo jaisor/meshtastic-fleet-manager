@@ -193,4 +193,31 @@ export const migrations: Migration[] = [
       ALTER TABLE nodes DROP COLUMN is_local;
     `,
   },
+  {
+    name: "007_assistant_queries",
+    sql: `
+      -- Every question put to the assistant, who asked it, what it cost and
+      -- what came back. Read-only questions, but each one is a paid call on
+      -- the server owner's key, and the daily budget is summed from here.
+      -- Not mesh data, so the purge endpoints leave it alone.
+      CREATE TABLE assistant_queries (
+        id             INTEGER PRIMARY KEY,
+        created_at     INTEGER NOT NULL,
+        username       TEXT NOT NULL,
+        prompt         TEXT NOT NULL,
+        provider       TEXT NOT NULL,
+        model          TEXT NOT NULL,
+        -- answered | not_understood | failed
+        outcome        TEXT NOT NULL,
+        query_json     TEXT,
+        note           TEXT,
+        error_text     TEXT,
+        -- Null when the provider did not report usage.
+        input_tokens   INTEGER,
+        output_tokens  INTEGER,
+        duration_ms    INTEGER NOT NULL
+      );
+      CREATE INDEX assistant_queries_created_at ON assistant_queries (created_at);
+    `,
+  },
 ];

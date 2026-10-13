@@ -37,6 +37,13 @@ export interface DiscoveryEvidence {
   message?: string;
   /** The radio saw this over MQTT rather than hearing it on the air. */
   viaMqtt?: boolean;
+  /**
+   * Arrived on our own subscription to the MQTT broker (`mqtt` in config),
+   * not through the radio at all. Distinct from `viaMqtt`, which is the
+   * radio's record of something *it* learned over MQTT: this one is a
+   * feed the operator configured, scoped by the topic they chose.
+   */
+  viaBroker?: boolean;
 }
 
 export function describeRules(rules: DiscoveryRules): string {
@@ -52,7 +59,17 @@ export function describeRules(rules: DiscoveryRules): string {
     parts.push("a text message");
   }
   if (!rules.includeMqtt) parts.push("heard on the air, not via MQTT");
-  return parts.join(", ");
+  const radio = parts.join(", ");
+  // The broker feed widens rather than narrows, and the channel rule does
+  // not reach it (see `refusalReason`), so it reads as its own clause.
+  if (!rules.brokerDiscovery) return radio;
+  const message =
+    rules.messageContains !== null
+      ? ` with a message containing "${rules.messageContains}"`
+      : rules.requireMessage
+        ? " sending a text message"
+        : "";
+  return `${radio}; or reported on the MQTT feed${message}`;
 }
 
 /** True when the rules admit nothing by default -- i.e. they are narrowed. */
@@ -61,38 +78,56 @@ export function isRestricted(rules: DiscoveryRules): boolean {
 }
 
 /**
- * Whether this packet is enough to admit a node not already in the fleet.
+ * Whether this packet is enough to admit a node not already in the fleet:
+ * null when it is, otherwise why not, in words for a log line. The decision
+ * and its explanation are one function so the log cannot drift from it.
  *
  * A missing channel on the evidence is treated as *not matching* when a
  * channel is required. Admitting on absent information would quietly widen
  * the policy, and the packets that carry no channel are exactly the ones a
  * narrow policy is meant to exclude.
  */
-export function admits(
+export function refusalReason(
   rules: DiscoveryRules,
   evidence: DiscoveryEvidence,
-): boolean {
-  // A node witnessed over MQTT was never heard on the air, so it cannot
-  // have transmitted on the local radio's channel -- whatever channel
-  // index the record happens to carry.
-  if (!rules.includeMqtt && evidence.viaMqtt === true) {
-    return false;
-  }
+): string | null {
+  if (evidence.viaBroker === true) {
+    // The broker feed is scoped by the topic the operator subscribed to,
+    // which already names the channel. The radio's channel rule cannot
+    // apply: a JSON packet's `channel` is an index into the *gateway's*
+    // channel table, not the local radio's, so comparing them would be the
+    // category error `channelEvidence` exists to prevent. `include_mqtt`
+    // does not apply either -- it concerns the radio's MQTT records.
+    if (!rules.brokerDiscovery) {
+      return "mqtt.discovery is off, so the broker only updates nodes already in the fleet";
+    }
+  } else {
+    // A node witnessed over MQTT was never heard on the air, so it cannot
+    // have transmitted on the local radio's channel -- whatever channel
+    // index the record happens to carry.
+    if (!rules.includeMqtt && evidence.viaMqtt === true) {
+      return "the radio only witnessed it over MQTT (discovery.include_mqtt is off)";
+    }
 
-  if (rules.channel !== null && evidence.channel !== rules.channel) {
-    return false;
+    if (rules.channel !== null && evidence.channel !== rules.channel) {
+      return evidence.channel === undefined
+        ? `discovery requires channel ${rules.channel} and this packet proves no channel`
+        : `heard on channel ${evidence.channel}, discovery requires channel ${rules.channel}`;
+    }
   }
 
   if (rules.requireMessage && evidence.message === undefined) {
-    return false;
+    return rules.messageContains !== null
+      ? `not a text message; discovery requires one containing "${rules.messageContains}"`
+      : "not a text message; discovery requires one";
   }
 
   if (rules.messageContains !== null) {
     const text = evidence.message?.toLowerCase();
     if (text === undefined || !text.includes(rules.messageContains)) {
-      return false;
+      return `the message does not contain "${rules.messageContains}"`;
     }
   }
 
-  return true;
+  return null;
 }

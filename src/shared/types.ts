@@ -5,6 +5,7 @@
  */
 
 import type { UserRole } from "./roles.js";
+import type { FleetQuery } from "./fleetQuery.js";
 
 /** Who is signed in, as every authenticated response reports it. */
 export interface SessionUser {
@@ -369,6 +370,33 @@ export interface RadioWatchdogStatus {
 }
 
 /**
+ * The MQTT broker feed, when `mqtt.enabled` is on: a second, read-only
+ * source of node reports, independent of the radio. Null in `/api/status`
+ * otherwise.
+ *
+ * Like the radio, a broker that is down is a condition to display, not a
+ * failure: the client keeps reconnecting and the console keeps serving.
+ */
+export interface MqttStatus {
+  /** The broker URL, any credentials in it removed. */
+  url: string;
+  topics: string[];
+  connected: boolean;
+  /** Whether nodes first reported here may join the fleet. */
+  discovery: boolean;
+  lastConnectedAt: number | null;
+  lastErrorText: string | null;
+  lastMessageAt: number | null;
+  /** Messages received since the server started, of any kind. */
+  received: number;
+  /** Copies of a packet already recorded, from another gateway or the radio. */
+  duplicates: number;
+  /** Messages that were not a usable JSON packet: protobuf, downlink, malformed. */
+  ignored: number;
+  lastIgnoredReason: string | null;
+}
+
+/**
  * A user-initiated operation currently occupying the radio.
  *
  * These are mesh round trips measured in tens of seconds, so the UI
@@ -457,6 +485,34 @@ export interface AdminOperation {
   errorText: string | null;
   createdAt: number;
   settledAt: number | null;
+}
+
+/**
+ * The assistant, when `llm.enabled` is on. Null in `/api/status` otherwise,
+ * and the UI then offers nothing at all.
+ */
+export interface AssistantStatus {
+  provider: string;
+  model: string;
+}
+
+/**
+ * The answer to one free-text question about the fleet.
+ *
+ * Read-only by construction: the answer is a filter over the fleet list,
+ * never an action. A request to change something ("restart abc") still gets
+ * the filter that finds the nodes it names, plus a note saying the change has
+ * to be made from the node's own page.
+ */
+export interface AskResponse {
+  /** Null when the question could not be read as one about the fleet. */
+  query: FleetQuery | null;
+  /**
+   * The model's own words: a caveat, or why it could not answer. Shown as
+   * the model's, separately from the filter, which is described by the UI
+   * from `query` itself.
+   */
+  note: string | null;
 }
 
 export interface ApiError {

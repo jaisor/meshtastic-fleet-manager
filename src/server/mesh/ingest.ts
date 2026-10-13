@@ -3,8 +3,7 @@ import { Protobuf } from "@meshtastic/core";
 import type { FastifyBaseLogger } from "fastify";
 import type { NodeRepository } from "../db/repositories/nodes.js";
 import type { ChannelRepository } from "../db/repositories/channels.js";
-import type { DiscoveryRules } from "../config.js";
-import { admits, describeRules, isRestricted } from "./discovery.js";
+import type { AdmissionGate, RecentPackets } from "./admission.js";
 import { logNode, toNodeId } from "./nodeId.js";
 import {
   applyConfig,
@@ -15,9 +14,9 @@ import type { MeshListener } from "./listener.js";
 import { channelFromProto, type StoredChannel } from "./radioConfig.js";
 
 /**
- * Turns listener events into database writes. This is the only writer to
- * the mesh-derived tables, which is what lets the repositories stay free of
- * protobuf types and the routes stay read-only.
+ * Turns listener events into database writes. With `mqttFeed.ts` it is the
+ * only writer to the mesh-derived tables, which is what lets the
+ * repositories stay free of protobuf types and the routes stay read-only.
  */
 
 function nowSeconds(): number {
@@ -29,7 +28,7 @@ function nowSeconds(): number {
  * source send 0. Treat anything implausible as "now" -- a slightly wrong
  * timestamp is better than a row in 1970 that sorts to the bottom forever.
  */
-function resolveTime(candidate: number | undefined): number {
+export function resolveTime(candidate: number | null | undefined): number {
   const now = nowSeconds();
   if (!candidate || candidate < 946_684_800 || candidate > now + 86_400) {
     return now;
@@ -38,17 +37,17 @@ function resolveTime(candidate: number | undefined): number {
 }
 
 /** Numeric protobuf enum -> its name, for display. */
-function enumName(
+export function enumName(
   table: Record<number, string> | object,
-  value: number | undefined,
+  value: number | null | undefined,
 ): string | null {
-  if (value === undefined) return null;
+  if (value === undefined || value === null) return null;
   const name = (table as Record<number, string>)[value];
   return typeof name === "string" ? name : null;
 }
 
 /** Protobuf uses 0 as "unset" for several optional numeric fields. */
-function zeroAsNull(value: number | undefined): number | null {
+export function zeroAsNull(value: number | null | undefined): number | null {
   return value === undefined || value === 0 ? null : value;
 }
 
@@ -100,9 +99,9 @@ export function attachIngest(
   listener: MeshListener,
   nodes: NodeRepository,
   channels: ChannelRepository,
-  discovery: DiscoveryRules,
+  admitted: AdmissionGate,
+  recent: RecentPackets,
   logger: FastifyBaseLogger,
-  onAdmitted?: (nodeNum: number) => void,
 ): void {
   let localNodeNum: number | null = null;
 
@@ -125,52 +124,29 @@ export function attachIngest(
    */
   let rawPacket: {
     from: number;
+    id: number;
     channel: number | undefined;
     viaMqtt: boolean;
+    /** The broker feed already recorded this packet; see `RecentPackets`. */
+    duplicate: boolean;
   } | null = null;
-
-  if (isRestricted(discovery)) {
-    logger.info(
-      { discovery: describeRules(discovery) },
-      "discovery is narrowed; nodes outside the criteria will be ignored",
-    );
-  }
-
-  /**
-   * The admission gate. Every handler below funnels through this before
-   * touching the database, so a node outside the discovery criteria leaves
-   * no trace at all -- not even a bare row with a last-heard time.
-   *
-   * Already-known nodes always pass: the criteria decide who joins the
-   * fleet, not what we are allowed to learn about members.
-   */
-  function admitted(nodeNum: number, evidence: Parameters<typeof admits>[1]): boolean {
-    // Our own radio is not a discovery candidate; it is the instrument.
-    if (nodeNum === localNodeNum) return true;
-    if (nodes.exists(nodeNum)) return true;
-
-    if (!admits(discovery, evidence)) {
-      logger.debug(
-        { ...logNode(nodeNum), evidence },
-        "packet ignored; node does not meet discovery criteria",
-      );
-      return false;
-    }
-
-    logger.info(
-      { ...logNode(nodeNum), evidence },
-      "node admitted to the fleet by discovery criteria",
-    );
-    // Fires only on first admission, so enrichment is asked for once per
-    // node rather than on every packet it ever sends.
-    onAdmitted?.(nodeNum);
-    return true;
-  }
 
   /** Evidence for a typed packet, taken from the raw one it was decoded from. */
   function evidenceFor(packet: { from: number }) {
     const raw = rawPacket?.from === packet.from ? rawPacket : null;
     return { channel: raw?.channel, viaMqtt: raw?.viaMqtt };
+  }
+
+  /**
+   * Whether this packet's history rows were already written from another
+   * copy. Only history is skipped: an upsert is idempotent, an insert is not.
+   */
+  function alreadyRecorded(packet: { from: number; id: number }): boolean {
+    return (
+      rawPacket?.from === packet.from &&
+      rawPacket.id === packet.id &&
+      rawPacket.duplicate
+    );
   }
 
   /**
@@ -330,6 +306,7 @@ export function attachIngest(
           voltage: zeroAsNull(m.voltage),
           lastHeardAt: recordedAt,
         });
+        if (alreadyRecorded(packet)) return;
         nodes.recordTelemetry(packet.from, {
           recordedAt,
           batteryLevel: zeroAsNull(m.batteryLevel),
@@ -345,6 +322,7 @@ export function attachIngest(
       }
 
       if (variant?.case === "environmentMetrics") {
+        if (alreadyRecorded(packet)) return;
         const m = variant.value;
         nodes.recordTelemetry(packet.from, {
           recordedAt,
@@ -380,6 +358,7 @@ export function attachIngest(
         ? packet.data.longitudeI / 1e7
         : null;
       if (latitude === null && longitude === null) return;
+      if (alreadyRecorded(packet)) return;
 
       nodes.recordPosition(packet.from, {
         recordedAt,
@@ -426,8 +405,10 @@ export function attachIngest(
     // even when it is our own radio or the node is turned away here.
     rawPacket = {
       from: packet.from,
+      id: packet.id,
       channel: channelEvidence(packet),
       viaMqtt: packet.viaMqtt,
+      duplicate: false,
     };
 
     if (localNodeNum !== null && packet.from === localNodeNum) return;
@@ -440,6 +421,11 @@ export function attachIngest(
     ) {
       return;
     }
+
+    // Marked only once admitted, so a copy turned away here (say, by the
+    // radio's channel rule) cannot stop the broker feed admitting its own.
+    rawPacket.duplicate = recent.has(packet.from, packet.id);
+    recent.add(packet.from, packet.id);
 
     // A row goes in unconditionally, even with no usable hop count. A node
     // admitted here and nowhere else used to be logged as discovered and

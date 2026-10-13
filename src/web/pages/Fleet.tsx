@@ -1,12 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronRight, RotateCw, Search, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronRight,
+  LoaderCircle,
+  RotateCw,
+  Search,
+  Sparkles,
+  X,
+} from "lucide-react";
 import type {
+  AssistantStatus,
   DiscoverySummary,
   FleetNode,
   RadioOccupancy,
 } from "../../shared/types";
+import { describeFleetQuery, matchesFleetQuery } from "../../shared/fleetQuery";
 import { api, ApiError } from "../api";
 import { nodePath } from "../router";
+import { BatteryLevel } from "../components/BatteryLevel";
 import { CapabilityBadge } from "../components/CapabilityBadge";
 import { describeOccupancy, NO_RADIO_HINT } from "../components/NodeFields";
 import { SignalDot } from "../components/SignalDot";
@@ -22,7 +34,7 @@ import {
   type SortDirection,
   type SortKey,
 } from "./fleetOrdering";
-import { loadFleetView, saveFleetView } from "./fleetView";
+import { loadFleetView, saveFleetView, type FleetAnswer } from "./fleetView";
 
 /** Poll cadence. The mesh is slow; refreshing faster would show nothing new. */
 const REFRESH_MS = 20_000;
@@ -36,6 +48,7 @@ export function Fleet({
   radioConnected,
   canOperate,
   radioBusy,
+  assistant,
 }: {
   onOpen: (path: string) => void;
   /** Null until the first status poll lands. */
@@ -46,6 +59,8 @@ export function Fleet({
   canOperate: boolean;
   /** Anything holding the radio, background sweeps included. */
   radioBusy: RadioOccupancy | null;
+  /** Null hides the question box: no assistant configured, or a viewer. */
+  assistant: AssistantStatus | null;
 }) {
   const [nodes, setNodes] = useState<FleetNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +131,7 @@ export function Fleet({
   // Seeded from sessionStorage so the view survives a trip into a node's
   // detail page, which unmounts this component entirely.
   const [view, setView] = useState(loadFleetView);
-  const { query, sortKey, direction } = view;
+  const { query, sortKey, direction, answer } = view;
 
   useEffect(() => {
     saveFleetView(view);
@@ -124,6 +139,21 @@ export function Fleet({
 
   const setQuery = (value: string) =>
     setView((current) => ({ ...current, query: value }));
+
+  const clearAnswer = () => setView((current) => ({ ...current, answer: null }));
+
+  /**
+   * Applies an answer. An ordering in it is adopted into the sort controls
+   * rather than held separately, so the controls always say what the list
+   * is doing and the operator can change it from there.
+   */
+  const applyAnswer = (next: FleetAnswer) =>
+    setView((current) => {
+      const sort = next.query?.sort;
+      return sort
+        ? { ...current, answer: next, sortKey: sort.key, direction: sort.direction }
+        : { ...current, answer: next };
+    });
 
   useEffect(() => {
     let cancelled = false;
@@ -151,15 +181,27 @@ export function Fleet({
   // Recomputed only when the data or the controls change, so typing does not
   // re-sort on unrelated renders. At a few hundred nodes this is cheap either
   // way; it keeps the 20s poll from doing needless work.
+  //
+  // An answer's time windows are measured from now on every recompute, so a
+  // node heard since the question was asked drops out at the next poll.
+  const answerQuery = answer?.query ?? null;
   const visible = useMemo(() => {
     if (!nodes) return [];
     const terms = parseQuery(query);
-    return sortNodes(
-      nodes.filter((node) => matchesQuery(node, terms)),
+    const now = Date.now() / 1000;
+    const sorted = sortNodes(
+      nodes.filter(
+        (node) =>
+          matchesQuery(node, terms) &&
+          (answerQuery === null || matchesFleetQuery(node, answerQuery, now)),
+      ),
       sortKey,
       direction,
     );
-  }, [nodes, query, sortKey, direction]);
+    // After sorting, so "the 5 weakest" is the five weakest. If the operator
+    // re-sorts, the limit follows the new order, which is what they see.
+    return answerQuery?.limit !== undefined ? sorted.slice(0, answerQuery.limit) : sorted;
+  }, [nodes, query, answerQuery, sortKey, direction]);
 
   if (error) {
     return <p className="card p-6 text-red-400">{error}</p>;
@@ -191,10 +233,20 @@ export function Fleet({
     );
   }
 
-  const filtering = query.trim().length > 0;
+  const searching = query.trim().length > 0;
+  const filtering = searching || answerQuery !== null;
 
   return (
     <section aria-label="Managed nodes">
+      {assistant && (
+        <AskBar
+          assistant={assistant}
+          answer={answer}
+          onAnswer={applyAnswer}
+          onClear={clearAnswer}
+        />
+      )}
+
       <FleetToolbar
         query={query}
         onQueryChange={setQuery}
@@ -230,16 +282,32 @@ export function Fleet({
         <div className="card p-8 text-center">
           <h3 className="text-base font-semibold text-white">No matches</h3>
           <p className="mx-auto mt-2 max-w-md text-sm text-neutral-500">
-            Nothing matches “{query.trim()}”. Search covers node ID, short and
-            long name, and role.
+            {answerQuery !== null && searching
+              ? `No node answers the question and also matches “${query.trim()}”.`
+              : answerQuery !== null
+                ? "No node in the fleet answers the question right now."
+                : `Nothing matches “${query.trim()}”. Search covers node ID, short and long name, and role.`}
           </p>
-          <button
-            type="button"
-            onClick={() => setQuery("")}
-            className="mt-4 rounded-lg border border-neutral-800 px-3 py-1.5 text-sm text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400"
-          >
-            Clear search
-          </button>
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            {searching && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                className="rounded-lg border border-neutral-800 px-3 py-1.5 text-sm text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400"
+              >
+                Clear search
+              </button>
+            )}
+            {answerQuery !== null && (
+              <button
+                type="button"
+                onClick={clearAnswer}
+                className="rounded-lg border border-neutral-800 px-3 py-1.5 text-sm text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400"
+              >
+                Clear question
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <ul className="space-y-2">
@@ -281,7 +349,9 @@ export function Fleet({
                         Heard {relativeTime(node.lastHeardAt)}
                       </span>
                       {node.batteryLevel !== null && (
-                        <span className="data">{node.batteryLevel}%</span>
+                        <span className="data">
+                          <BatteryLevel level={node.batteryLevel} />
+                        </span>
                       )}
                       {node.snr !== null && (
                         <span className="data" title="Signal-to-noise ratio of the last direct packet">
@@ -450,6 +520,150 @@ function FleetToolbar({
           </span>
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Matches the server's `MAX_PROMPT_LENGTH`. */
+const MAX_QUESTION_LENGTH = 500;
+
+/**
+ * The assistant's question box, and the answer it is currently applying.
+ *
+ * An answer is a filter over this list and nothing more: the server sends
+ * the question to the configured LLM, which can only fill in filter fields,
+ * and the nodes shown are picked here by `matchesFleetQuery`. Any change to
+ * a node is still made from its own page, by a role allowed to make it.
+ *
+ * What the filter does is described from the query itself, never from the
+ * model's prose, so the operator reads exactly what is being applied. The
+ * model's own words appear separately, labelled as such.
+ */
+function AskBar({
+  assistant,
+  answer,
+  onAnswer,
+  onClear,
+}: {
+  assistant: AssistantStatus;
+  answer: FleetAnswer | null;
+  onAnswer: (answer: FleetAnswer) => void;
+  onClear: () => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function ask() {
+    const prompt = draft.trim();
+    if (!prompt || asking) return;
+    setAsking(true);
+    setError(null);
+    try {
+      const result = await api.ask(prompt);
+      onAnswer({ prompt, query: result.query, note: result.note });
+      setDraft("");
+    } catch (cause) {
+      // The draft stays, so a rate limit or a timeout costs a click rather
+      // than retyping the question.
+      setError(
+        cause instanceof ApiError ? cause.message : "The question did not reach the server.",
+      );
+    } finally {
+      setAsking(false);
+    }
+  }
+
+  const clauses = answer?.query ? describeFleetQuery(answer.query) : [];
+  const sort = answer?.query?.sort;
+
+  return (
+    <div className="mb-4 space-y-2">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void ask();
+        }}
+        className="flex gap-2"
+      >
+        <div className="relative min-w-0 flex-1">
+          <Sparkles
+            aria-hidden
+            className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-amber-500/60"
+          />
+          <input
+            type="text"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setDraft("");
+            }}
+            disabled={asking}
+            maxLength={MAX_QUESTION_LENGTH}
+            aria-label="Ask a question about the fleet"
+            placeholder="Ask about the fleet, e.g. routers not heard in 2 days"
+            autoComplete="off"
+            className="w-full rounded-lg border border-neutral-800 bg-neutral-950/60 py-2 pr-3 pl-9 text-sm text-neutral-100 placeholder-neutral-600 [corner-shape:bevel] focus:border-amber-500/50 disabled:opacity-60"
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={asking || draft.trim().length === 0}
+          title={`Answered by ${assistant.model} (${assistant.provider}). Finds nodes; changes nothing.`}
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-neutral-800 px-3 py-2 text-sm text-neutral-300 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-neutral-800 disabled:hover:text-neutral-300"
+        >
+          {asking && <LoaderCircle aria-hidden className="h-4 w-4 animate-spin" />}
+          {asking ? "Asking…" : "Ask"}
+        </button>
+      </form>
+
+      {error && (
+        <p role="alert" className="text-xs text-amber-200/90">
+          {error}
+        </p>
+      )}
+
+      {answer && (
+        <div
+          role="status"
+          className="flex items-start gap-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2.5 text-sm [corner-shape:bevel]"
+        >
+          <div className="min-w-0 flex-1 space-y-1">
+            <p className="truncate text-neutral-400" title={answer.prompt}>
+              “{answer.prompt}”
+            </p>
+            {answer.query === null ? (
+              <p className="text-neutral-500">Not answered. The list is unfiltered.</p>
+            ) : (
+              <p className="text-neutral-200">
+                {clauses.length > 0
+                  ? `Showing nodes ${clauses.join(" · ")}`
+                  : "Showing every node"}
+                {sort && (
+                  <span className="text-neutral-500">
+                    {" "}
+                    — sorted by {sortOption(sort.key).label.toLowerCase()},{" "}
+                    {directionLabel(sort.key, sort.direction).toLowerCase()}
+                  </span>
+                )}
+              </p>
+            )}
+            {answer.note && (
+              <p className="text-xs text-neutral-500">
+                <span className="text-neutral-400">Assistant:</span> {answer.note}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onClear}
+            className="shrink-0 rounded p-1 text-neutral-500 transition hover:text-amber-400"
+          >
+            <X aria-hidden className="h-4 w-4" />
+            <span className="sr-only">Clear the question</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

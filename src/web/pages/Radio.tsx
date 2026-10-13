@@ -23,6 +23,7 @@ import {
   TelemetryHistory,
   describeOccupancy,
 } from "../components/NodeFields";
+import { BatteryLevel } from "../components/BatteryLevel";
 import { RadioSettings } from "../components/RadioSettings";
 import { StatusDot } from "../components/StatusDot";
 import { absoluteTime, humanizeEnum, relativeTime } from "../components/format";
@@ -259,7 +260,7 @@ export function Radio({
                 {node.firmwareVersion ?? "—"}
               </Field>
               <Field label="Battery" mono>
-                {node.batteryLevel === null ? "—" : `${node.batteryLevel}%`}
+                {node.batteryLevel === null ? "—" : <BatteryLevel level={node.batteryLevel} />}
               </Field>
             </dl>
             <PublicKey value={detail.publicKey} isLocal />

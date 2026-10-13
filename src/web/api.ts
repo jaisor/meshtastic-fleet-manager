@@ -2,6 +2,8 @@ import type { UserRole } from "../shared/roles";
 import type {
   AdminCapability,
   AdminOperation,
+  AskResponse,
+  AssistantStatus,
   ChannelUpdate,
   ConfigReadOutcome,
   LocalRadioDetail,
@@ -13,6 +15,7 @@ import type {
   DiscoverySummary,
   ManagedUser,
   MaintenanceResult,
+  MqttStatus,
   RadioOccupancy,
   RadioStatus,
   SessionResponse,
@@ -78,6 +81,10 @@ export interface StatusResponse {
    */
   radioBusy: RadioOccupancy | null;
   discovery: DiscoverySummary;
+  /** Null when the server has no assistant configured. */
+  assistant: AssistantStatus | null;
+  /** Null when the MQTT broker feed is off. */
+  mqtt: MqttStatus | null;
 }
 
 export interface NodeDetailResponse {
@@ -128,6 +135,13 @@ export const api = {
     }),
 
   getStatus: () => request<StatusResponse>("/api/status"),
+
+  /** One paid call to the configured LLM; answers with a filter, never an action. */
+  ask: (prompt: string) =>
+    request<AskResponse>("/api/ask", {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    }),
 
   cancelTask: (id: number) =>
     request<{ cancelled: boolean }>(`/api/tasks/${id}/cancel`, {

@@ -43,6 +43,15 @@ export function canAdminister(role: UserRole): boolean {
 }
 
 /**
+ * May ask the assistant a question. Read-only in effect, but every question
+ * is a paid call to the LLM provider on the server owner's key, so it sits
+ * with the roles trusted to put the radio to work rather than with viewers.
+ */
+export function canAskAssistant(role: UserRole): boolean {
+  return role === "admin" || role === "manager";
+}
+
+/**
  * The account defined in config.yaml rather than the database.
  *
  * It exists so the console can always be reached: the database can be

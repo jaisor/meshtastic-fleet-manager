@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { RadioTower, TriangleAlert } from "lucide-react";
-import type { RadioStatus, RadioTask, SessionUser } from "../../shared/types";
+import type { MqttStatus, RadioStatus, RadioTask, SessionUser } from "../../shared/types";
 import { UserMenu } from "./UserMenu";
 import { RadioTaskBanner } from "./RadioTaskBanner";
 import { absoluteTime, relativeTime } from "./format";
@@ -20,6 +20,7 @@ import { absoluteTime, relativeTime } from "./format";
  */
 export function Layout({
   radio,
+  mqtt,
   tasks,
   user,
   onCancelTask,
@@ -28,6 +29,8 @@ export function Layout({
   children,
 }: {
   radio: RadioStatus | null;
+  /** Null when the broker feed is off, and then nothing is shown. */
+  mqtt: MqttStatus | null;
   tasks: RadioTask[];
   user: SessionUser;
   onCancelTask: (task: RadioTask) => void;
@@ -47,6 +50,7 @@ export function Layout({
         </a>
 
         <div className="flex items-center gap-4">
+          {mqtt && <MqttPill mqtt={mqtt} />}
           {radio && <RadioPill radio={radio} />}
           <UserMenu user={user} onNavigate={onNavigate} onLogout={onLogout} />
         </div>
@@ -230,6 +234,57 @@ function RadioPill({ radio }: { radio: RadioStatus }) {
       {radio.enabled ? "Radio disconnected" : "Radio off"}
       <span className="hidden sm:inline">— read-only</span>
     </AmberPill>
+  );
+}
+
+/**
+ * The broker feed, beside the radio rather than inside its pill: they are
+ * independent sources, and either can be down while the other works.
+ *
+ * No banner for a lost broker. The radio banner exists because without the
+ * radio nothing can be written; without the broker, only the reports that
+ * reach us through it stop, and the pill says so.
+ */
+function MqttPill({ mqtt }: { mqtt: MqttStatus }) {
+  const lines = [
+    `MQTT broker ${mqtt.url}`,
+    `Topics: ${mqtt.topics.join(", ")}`,
+    mqtt.discovery
+      ? "New nodes reported here join the fleet."
+      : "Updates nodes already in the fleet; never admits new ones.",
+    mqtt.lastMessageAt
+      ? `Last message ${relativeTime(mqtt.lastMessageAt)}; ${mqtt.received} since startup`
+      : "No messages since startup",
+  ];
+  if (mqtt.duplicates > 0) {
+    lines.push(`${mqtt.duplicates} duplicate copies skipped (other gateways, or heard by the radio too)`);
+  }
+  if (mqtt.ignored > 0) {
+    lines.push(`${mqtt.ignored} ignored, last: ${mqtt.lastIgnoredReason ?? "no reason recorded"}`);
+  }
+  if (!mqtt.connected) {
+    lines.push(
+      mqtt.lastConnectedAt
+        ? `Disconnected; last connected ${relativeTime(mqtt.lastConnectedAt)}. Retrying.`
+        : "Never connected since startup. Retrying.",
+    );
+  }
+  if (mqtt.lastErrorText) lines.push(mqtt.lastErrorText);
+  const title = lines.join("\n");
+
+  // A refused subscription leaves the connection up and the feed silent, so
+  // it is amber as well.
+  if (!mqtt.connected || mqtt.lastErrorText) {
+    return <AmberPill title={title}>{mqtt.connected ? "MQTT topic refused" : "MQTT down"}</AmberPill>;
+  }
+  return (
+    <span
+      title={title}
+      className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300 [corner-shape:bevel]"
+    >
+      <span aria-hidden className="h-2 w-2 rounded-full bg-emerald-500" />
+      MQTT
+    </span>
   );
 }
 

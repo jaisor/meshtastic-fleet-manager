@@ -194,7 +194,71 @@ discovery:
   # so it cannot satisfy "what the radio hears" -- yet the radio still lists
   # it in the node database it hands over, which is the usual reason
   # strangers appear in a fleet that should be private.
+  #
+  # This is about the RADIO's MQTT records only. The broker feed configured
+  # under `mqtt:` below has its own switch, mqtt.discovery.
   include_mqtt: false
+
+# Listen to an MQTT broker for packets from the fleet's nodes, alongside the
+# radio. Useful when gateways uplink nodes the local radio cannot hear, and
+# it keeps working with the radio unplugged or serial.enabled off.
+#
+# Read-only: the server subscribes and never publishes, so it cannot send
+# anything to the mesh. JSON payloads only -- the gateways need JSON output
+# enabled (Meshtastic: MQTT module, "JSON enabled"), and the topic should be
+# the .../2/json/... tree. Protobuf payloads (.../2/e/...) are ignored and
+# logged once.
+#
+# The node a packet is about is its "from" field. Names, hardware, role,
+# battery and other telemetry, position and check-in times are recorded.
+# The gateway's rssi, snr and hops_away are NOT: they describe how well the
+# gateway heard the node, and the fleet's link figures mean how well the
+# local radio hears it. A packet uplinked by several gateways, or also heard
+# by the radio, is recorded once.
+mqtt:
+  enabled: false
+
+  # mqtt://, mqtts://, ws:// or wss://. From inside the container, a broker
+  # on the Docker host is mqtt://host.docker.internal:1883.
+  url: mqtt://broker.local:1883
+
+  # One topic filter or a list; MQTT wildcards (+, #) allowed. The topic is
+  # also the discovery scope: everything published under it is a candidate.
+  # On a public broker, keep it to your own channel, not the whole region.
+  topic: msh/US/2/json/#
+  #   topic:
+  #     - msh/US/2/json/MyChannel/#
+  #     - msh/US/2/json/LongFast/!a4c138f0
+
+  # Optional. At most one of password / password_file; a file suits Docker
+  # secrets. Credentials in the URL also work, and are never shown or logged.
+  # username: fleet
+  # password_file: /run/secrets/mqtt_password
+
+  # Defaults to a random id on each start. Set a fixed one only if the
+  # broker's ACL needs it, and never share it between two instances: the
+  # broker disconnects the older of two clients with the same id.
+  # client_id: fleet-manager
+
+  # Set false only for a broker with a self-signed certificate.
+  reject_unauthorized: true
+
+  # Let nodes first reported here join the fleet. With false, the feed only
+  # keeps nodes already in the fleet up to date.
+  #
+  # The discovery section's message rules apply here too: with
+  # message_contains: "join fleet", a node joins from the broker only by
+  # sending that message. Its channel rule does not: the channel number in a
+  # JSON packet is the GATEWAY's channel index, not the local radio's, so
+  # here the topic is what scopes the channel.
+  discovery: true
+
+  # Log one line per message received: topic, node, packet type, gateway,
+  # and what became of it -- admitted (joined the fleet), recorded,
+  # duplicate, ignored, or not admitted with the rule that refused it. It is
+  # how to see whether the feed and the discovery rules do what you meant.
+  # Set false on a busy broker; the same lines are then logged at debug.
+  log_messages: true
 
 fleet:
   # A node heard within this window is "online".
@@ -210,6 +274,62 @@ fleet:
   # Telemetry and position history older than this is pruned. Unbounded
   # growth on a Raspberry Pi's SD card is a real failure mode.
   telemetry_retention: 30d
+
+# The assistant: a question box on the fleet list for managers and admins
+# ("routers not heard in 2 days", "the 5 lowest batteries"). The question is
+# sent to an LLM, which turns it into a filter over the list. It is
+# read-only: it finds nodes and changes nothing, and any change is still
+# made from a node's own page by a role allowed to make it.
+#
+# What leaves this server is the question text and a fixed description of
+# the filter fields -- never node names, positions or keys. Questions,
+# token counts and outcomes are recorded in the database.
+llm:
+  enabled: false
+
+  # google | anthropic | openai | openai_compatible
+  #
+  #   google             Free tier available with an AI Studio key, no card
+  #                      needed (https://aistudio.google.com/apikey). On the
+  #                      free tier Google may use what is sent to improve its
+  #                      products; enabling billing on the key stops that.
+  #   anthropic          Claude. Pay as you go; no free tier.
+  #   openai             Pay as you go; no free tier.
+  #   openai_compatible  Any server speaking the OpenAI chat API: Ollama,
+  #                      LM Studio, vLLM, OpenRouter. Free and offline with a
+  #                      local model, which is the option for a console with
+  #                      no internet. Needs base_url, and a server that
+  #                      accepts a JSON schema in response_format.
+  provider: google
+
+  # Required for every provider except google, which defaults to
+  # gemini-2.5-flash-lite (free-tier eligible). A small, cheap model is the
+  # right choice: each question is one short structured answer. Check the
+  # provider's model list for current names, e.g. claude-haiku-5-5 for
+  # anthropic, or "llama3.2" for a local Ollama.
+  # model: gemini-2.5-flash-lite
+
+  # The key, from at most one of these. With none set, the provider's usual
+  # environment variable is read: GOOGLE_GENERATIVE_AI_API_KEY,
+  # ANTHROPIC_API_KEY or OPENAI_API_KEY. An enabled assistant with no key
+  # refuses to start. A file suits Docker secrets; keep the key out of this
+  # file if this file is shared.
+  #
+  #   api_key_file: /run/secrets/llm_api_key
+  #   api_key_env: MFM_LLM_API_KEY
+  #   api_key: "..."
+
+  # For openai_compatible, e.g. http://localhost:11434/v1 for Ollama. From
+  # inside the container, the host is http://host.docker.internal:11434/v1.
+  # base_url: http://localhost:11434/v1
+
+  # How long to wait for one answer.
+  timeout: 30s
+
+  # Input plus output tokens per UTC day, across all users; 0 is no cap. A
+  # question costs roughly 2,000, so the default allows about 250 a day. On a
+  # free tier the provider's own daily quota usually binds first.
+  daily_token_budget: 500000
 
 logging:
   level: info

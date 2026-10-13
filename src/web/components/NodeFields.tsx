@@ -6,6 +6,7 @@ import type {
   RadioOccupancy,
   TelemetryPoint,
 } from "../../shared/types";
+import { BatteryLevel } from "./BatteryLevel";
 import { absoluteTime, metric, relativeTime } from "./format";
 
 /**
@@ -323,7 +324,7 @@ export function TelemetryHistory({
                   {relativeTime(point.recordedAt)}
                 </td>
                 <td className="data px-3 py-2 text-right text-neutral-300">
-                  {point.batteryLevel === null ? "—" : `${point.batteryLevel}%`}
+                  {point.batteryLevel === null ? "—" : <BatteryLevel level={point.batteryLevel} />}
                 </td>
                 <td className="data px-3 py-2 text-right text-neutral-300">
                   {metric(point.voltage, "", 2)}

@@ -1,3 +1,4 @@
+import { sanitizeFleetQuery, type FleetQuery } from "../../shared/fleetQuery";
 import {
   SORT_OPTIONS,
   type SortDirection,
@@ -19,16 +20,30 @@ import {
 
 const STORAGE_KEY = "mfm.fleetView";
 
+/**
+ * The assistant's last answer, applied on top of the search box until it is
+ * cleared. Kept with the rest of the view for the same reason: drilling into
+ * a node from an answer and coming back should still show that answer.
+ */
+export interface FleetAnswer {
+  prompt: string;
+  /** Null when the question could not be answered as a filter. */
+  query: FleetQuery | null;
+  note: string | null;
+}
+
 export interface FleetView {
   query: string;
   sortKey: SortKey;
   direction: SortDirection;
+  answer: FleetAnswer | null;
 }
 
 export const DEFAULT_FLEET_VIEW: FleetView = {
   query: "",
   sortKey: "name",
   direction: "asc",
+  answer: null,
 };
 
 function isSortKey(value: unknown): value is SortKey {
@@ -37,6 +52,18 @@ function isSortKey(value: unknown): value is SortKey {
 
 function isDirection(value: unknown): value is SortDirection {
   return value === "asc" || value === "desc";
+}
+
+/** The query is rebuilt field by field; see `sanitizeFleetQuery`. */
+function readAnswer(value: unknown): FleetAnswer | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { prompt, query, note } = value as Partial<FleetAnswer>;
+  if (typeof prompt !== "string") return null;
+  return {
+    prompt,
+    query: query === null || query === undefined ? null : sanitizeFleetQuery(query),
+    note: typeof note === "string" ? note : null,
+  };
 }
 
 /**
@@ -59,13 +86,14 @@ export function loadFleetView(): FleetView {
       return DEFAULT_FLEET_VIEW;
     }
 
-    const { query, sortKey, direction } = parsed as Partial<FleetView>;
+    const { query, sortKey, direction, answer } = parsed as Partial<FleetView>;
     return {
       query: typeof query === "string" ? query : DEFAULT_FLEET_VIEW.query,
       sortKey: isSortKey(sortKey) ? sortKey : DEFAULT_FLEET_VIEW.sortKey,
       direction: isDirection(direction)
         ? direction
         : DEFAULT_FLEET_VIEW.direction,
+      answer: readAnswer(answer),
     };
   } catch {
     return DEFAULT_FLEET_VIEW;

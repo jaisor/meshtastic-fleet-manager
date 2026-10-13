@@ -14,8 +14,11 @@ import { describeRules, isRestricted } from "../mesh/discovery.js";
 import { requireCapability, type AuthContext } from "../auth.js";
 import type { NodeEnricher } from "../mesh/enrich.js";
 import type { RadioWatchdog } from "../mesh/watchdog.js";
+import type { MqttFeed } from "../mesh/mqttFeed.js";
 import { logNode, parseNodeId } from "../mesh/nodeId.js";
+import type { Assistant } from "../assistant/index.js";
 import type {
+  AssistantStatus,
   NodeConfigUpdate,
   RadioOccupancy,
   RadioStatus,
@@ -68,6 +71,10 @@ export interface ApiDependencies {
   enricher: NodeEnricher;
   /** Null when `watchdog.enabled` or `serial.enabled` is off. */
   watchdog: RadioWatchdog | null;
+  /** Null when `llm.enabled` is off. */
+  assistant: Assistant | null;
+  /** Null when `mqtt.enabled` is off. */
+  mqtt: MqttFeed | null;
 }
 
 export function registerApiRoutes(
@@ -95,6 +102,14 @@ export function registerApiRoutes(
       restricted: isRestricted(deps.config.discoveryRules),
       description: describeRules(deps.config.discoveryRules),
     },
+    // Null hides the question box entirely. Provider and model, never the key.
+    assistant: deps.assistant
+      ? ({
+          provider: deps.assistant.provider,
+          model: deps.assistant.modelName,
+        } satisfies AssistantStatus)
+      : null,
+    mqtt: deps.mqtt?.getStatus() ?? null,
   }));
 
   /**

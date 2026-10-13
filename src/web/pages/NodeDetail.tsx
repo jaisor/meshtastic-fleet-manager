@@ -6,6 +6,7 @@ import type {
   NodeConfigUpdate,
   RadioOccupancy,
 } from "../../shared/types";
+import { BatteryLevel } from "../components/BatteryLevel";
 import { CapabilityBadge } from "../components/CapabilityBadge";
 import { RadioSettings } from "../components/RadioSettings";
 import {
@@ -298,7 +299,7 @@ export function NodeDetail({
             {metric(node.rssi, " dBm", 0)}
           </Field>
           <Field label="Battery" mono>
-            {node.batteryLevel === null ? "—" : `${node.batteryLevel}%`}
+            {node.batteryLevel === null ? "—" : <BatteryLevel level={node.batteryLevel} />}
           </Field>
         </dl>
 

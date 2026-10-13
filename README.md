@@ -10,6 +10,9 @@ web console for viewing their state and remotely reconfiguring them.
   and optionally narrowed to a channel, to nodes that send a message, or to a keyword in it.
   A node discovered with nothing but its number is asked for its name, hardware and metrics
   rather than leaving a blank row until its next broadcast.
+- **MQTT feed (optional).** Subscribe to a broker your gateways uplink to, and nodes the
+  local radio cannot hear check in too, even with no radio attached. JSON payloads,
+  read-only.
 - **Persistent state.** Identity, telemetry, and position survive restarts, so the console
   is useful before the next packet arrives.
 - **Admin-capability probing.** Establishes which nodes accept admin messages from the
@@ -21,6 +24,9 @@ web console for viewing their state and remotely reconfiguring them.
 - **Search and sort.** Filter the fleet as you type across node ID, short and long name, and
   role; sort by short name, last heard, role, battery, remote-admin capability, signal
   quality or hops away.
+- **Ask in plain words (optional).** "Routers not heard in 2 days", "the 5 lowest
+  batteries": an LLM of your choosing turns the question into a filter over the fleet list.
+  Read-only, and off unless configured.
 
 ## Requirements
 
@@ -340,6 +346,84 @@ permission that was never broken.
 Remote writes are point-to-point and slow. The UI confirms before sending, shows the
 operation as pending, and only reports success once the remote node confirms — a mesh ACK
 means "relayed", not "applied".
+
+## Asking questions about the fleet
+
+With `llm.enabled: true`, managers and admins get a question box above the fleet list.
+A question is sent to the configured LLM, which answers with a filter (last heard, role,
+battery, hardware, signal, hops, firmware, admin capability, a sort and a count), and the
+list shows the nodes that match. It **finds nodes and changes nothing**: "restart node abc"
+shows node abc with a note that changes are made from its page. Every change is still made
+from a node's own page by a role allowed to make it.
+
+Only the question text leaves the server, with a fixed description of the filter. Node names,
+positions and keys are never sent, so a node named to address a language model cannot steer
+the answer. Each question is recorded with its token count, and `llm.daily_token_budget`
+caps the daily spend across all users.
+
+```yaml
+llm:
+  enabled: true
+  provider: google                 # google | anthropic | openai | openai_compatible
+  api_key_file: /run/secrets/llm_api_key
+```
+
+| Provider | Cost | Notes |
+| --- | --- | --- |
+| `google` | Free tier with an [AI Studio key](https://aistudio.google.com/apikey), no card | The default model, `gemini-2.5-flash-lite`, is free-tier eligible. On the free tier Google may use what is sent to improve its products. |
+| `anthropic` | Pay as you go | Set `model`, e.g. `claude-haiku-5-5`. |
+| `openai` | Pay as you go | Set `model`. |
+| `openai_compatible` | Free with a local model | Ollama, LM Studio, vLLM or OpenRouter via `base_url`. Works with no internet. |
+
+A question costs roughly 2,000 tokens, which is a small fraction of a cent at paid rates.
+An enabled assistant with no key refuses to start, like any other config error; the
+annotated example lists every key.
+
+## Listening to an MQTT broker
+
+Meshtastic gateways can uplink every packet they hear to an MQTT broker. With `mqtt.enabled:
+true` the console subscribes to that broker as a second source beside the radio, so nodes
+out of the radio's range still check in, and the fleet keeps updating with the radio
+unplugged.
+
+```yaml
+mqtt:
+  enabled: true
+  url: mqtt://broker.local:1883
+  topic: msh/US/2/json/MyChannel/#
+  username: fleet
+  password_file: /run/secrets/mqtt_password
+  discovery: true      # nodes first reported here join the fleet
+```
+
+- **JSON only, for now.** Turn on JSON output in the gateways' MQTT module and subscribe to
+  the `.../2/json/...` topics. Protobuf payloads (`.../2/e/...`) are ignored, with one
+  warning in the log.
+- **Read-only.** The console subscribes and never publishes, so it cannot send anything to
+  the mesh. Downlink commands on the same topics (`sendtext`, `sendposition`) are ignored.
+- **The node is `from`.** Names, hardware, role, battery and other telemetry, position and
+  check-in times are recorded against it. `sender` is the gateway, and the gateway's
+  `rssi`, `snr` and `hops_away` are **not** recorded: the console's signal figures mean
+  how well *your* radio hears a node, and a gateway's -32 dBm would claim a strong link to
+  a node your radio may not hear at all.
+- **Each packet once.** Every gateway that hears a packet publishes its own copy, and the
+  radio may hear it too. Copies are recognized by sender and packet ID and recorded once.
+- **Discovery.** With `mqtt.discovery: true`, a node first reported on the broker joins the
+  fleet. The `discovery` section's message rules still apply, so `message_contains: "join"`
+  admits a node from the broker only once it sends that word. Its channel rule does not:
+  a JSON packet's channel number is the gateway's channel index, not your radio's. The
+  subscribed topic is what scopes the channel, so on a public broker subscribe to your own
+  channel rather than the whole region.
+
+The log has a line for each connection attempt and subscription, and one per message:
+its topic, node, type and gateway, and whether it admitted the node, updated it, was a
+duplicate, was ignored, or was not admitted, with the rule that refused it. Set
+`mqtt.log_messages: false` on a busy broker to move the per-message lines to debug.
+
+A green **MQTT** pill in the header means connected and subscribed. It turns amber when the
+broker is unreachable, refuses the credentials, or refuses a topic. Its tooltip gives the
+reason, message counts and the last message ignored. As with the radio, a broker that is
+down is retried forever and never stops the console from starting.
 
 ## Scope
 

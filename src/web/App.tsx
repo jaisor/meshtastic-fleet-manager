@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
+  AssistantStatus,
   DiscoverySummary,
+  MqttStatus,
   RadioOccupancy,
   RadioStatus,
   RadioTask,
   SessionUser,
 } from "../shared/types";
-import { canAdminister, canOperateRadio } from "../shared/roles";
+import { canAdminister, canAskAssistant, canOperateRadio } from "../shared/roles";
 import { api, ApiError } from "./api";
 import { nodePath, useRoute } from "./router";
 import { Backdrop } from "./components/Backdrop";
@@ -38,6 +40,8 @@ export function App() {
   const [tasks, setTasks] = useState<RadioTask[]>([]);
   const [radioBusy, setRadioBusy] = useState<RadioOccupancy | null>(null);
   const [discovery, setDiscovery] = useState<DiscoverySummary | null>(null);
+  const [assistant, setAssistant] = useState<AssistantStatus | null>(null);
+  const [mqtt, setMqtt] = useState<MqttStatus | null>(null);
   const [route, navigate] = useRoute();
 
   useEffect(() => {
@@ -65,6 +69,8 @@ export function App() {
         setTasks(status.tasks);
         setRadioBusy(status.radioBusy);
         setDiscovery(status.discovery);
+        setAssistant(status.assistant);
+        setMqtt(status.mqtt);
         // Reschedule from the response rather than on a fixed interval, so
         // the cadence follows whether the radio is actually busy.
         // Follows `radioBusy`, not `tasks`: a background sweep disables
@@ -154,6 +160,7 @@ export function App() {
       <Backdrop />
       <Layout
         radio={radio}
+        mqtt={mqtt}
         tasks={tasks}
         user={user}
         onCancelTask={(task) => void cancelTask(task)}
@@ -209,6 +216,9 @@ export function App() {
             radioConnected={(radio?.connected ?? false) && radio?.localNodeNum != null}
             canOperate={canOperateRadio(user.role)}
             radioBusy={radioBusy}
+            // Hidden, not disabled, for viewers and with no assistant
+            // configured: neither is something the person can fix from here.
+            assistant={canAskAssistant(user.role) ? assistant : null}
           />
         )}
       </Layout>

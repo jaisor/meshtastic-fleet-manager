@@ -9,8 +9,12 @@ import { openDatabase } from "./db/index.js";
 import { NodeRepository } from "./db/repositories/nodes.js";
 import { ChannelRepository } from "./db/repositories/channels.js";
 import { AdminOperationRepository } from "./db/repositories/adminOperations.js";
+import { AssistantQueryRepository } from "./db/repositories/assistantQueries.js";
+import { Assistant } from "./assistant/index.js";
 import { MeshListener } from "./mesh/listener.js";
 import { attachIngest } from "./mesh/ingest.js";
+import { createAdmissionGate, RecentPackets } from "./mesh/admission.js";
+import { MqttFeed } from "./mesh/mqttFeed.js";
 import { AdminClient } from "./mesh/admin.js";
 import { LocalRadioProbe } from "./mesh/localRadio.js";
 import { CapabilityProber } from "./mesh/capability.js";
@@ -23,6 +27,7 @@ import { UserRepository } from "./db/repositories/users.js";
 import { registerApiRoutes } from "./routes/api.js";
 import { registerRadioRoutes } from "./routes/radio.js";
 import { registerAdminRoutes } from "./routes/admin.js";
+import { registerAssistantRoutes } from "./routes/assistant.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -114,9 +119,30 @@ async function main(): Promise<void> {
     enabled: config.discovery.probe_new_nodes,
   });
 
-  attachIngest(listener, nodes, channels, config.discoveryRules, app.log, (nodeNum) =>
-    enricher.enqueue(nodeNum),
-  );
+  // One gate and one memory of recent packets for both sources, so a node
+  // admitted by either is a member for both, and a packet heard by the radio
+  // and uplinked by three gateways is recorded once.
+  const admitted = createAdmissionGate({
+    nodes,
+    rules: config.discoveryRules,
+    logger: app.log,
+    localNodeNum: () => listener.getStatus().localNodeNum,
+    onAdmitted: (nodeNum) => enricher.enqueue(nodeNum),
+  });
+  const recent = new RecentPackets();
+
+  attachIngest(listener, nodes, channels, admitted, recent, app.log);
+
+  const mqtt = config.broker
+    ? new MqttFeed({
+        config: config.broker,
+        rules: config.discoveryRules,
+        nodes,
+        admitted,
+        recent,
+        logger: app.log,
+      })
+    : null;
 
   const admin = new AdminClient({
     listener,
@@ -162,6 +188,28 @@ async function main(): Promise<void> {
         })
       : null;
 
+  // Built at startup so a provider that cannot be constructed fails the boot,
+  // like the rest of the config. Nothing is sent until someone asks.
+  const assistant = config.assistant
+    ? new Assistant({
+        config: config.assistant,
+        queries: new AssistantQueryRepository(db),
+        logger: app.log,
+        staleAfter: config.fleet.stale_after,
+        offlineAfter: config.fleet.offline_after,
+      })
+    : null;
+  if (assistant) {
+    app.log.info(
+      {
+        provider: assistant.provider,
+        model: assistant.modelName,
+        dailyTokenBudget: config.assistant?.dailyTokenBudget,
+      },
+      "assistant enabled; questions are sent to the provider on this server's key",
+    );
+  }
+
   await app.register(cookie, { secret: config.sessionSecret });
 
   const auth = {
@@ -201,8 +249,11 @@ async function main(): Promise<void> {
       auth,
       enricher,
       watchdog,
+      assistant,
+      mqtt,
     };
     registerApiRoutes(scope, apiDeps);
+    registerAssistantRoutes(scope, { auth, assistant });
     registerRadioRoutes(scope, { ...apiDeps, channels });
     registerAdminRoutes(scope, { auth, users, db });
   });
@@ -216,6 +267,9 @@ async function main(): Promise<void> {
   } else {
     app.log.warn("serial.enabled is false; running without a radio");
   }
+  // Independent of the radio: with serial off or the radio unplugged, the
+  // broker is still a source of check-ins.
+  mqtt?.start();
 
   const pruneTimer = setInterval(() => {
     const removed = nodes.pruneHistory(config.fleet.telemetry_retention);
@@ -229,6 +283,7 @@ async function main(): Promise<void> {
     prober.stop();
     enricher.stop();
     watchdog?.stop();
+    await mqtt?.stop();
     await listener.stop();
     await app.close();
     db.close();

@@ -7,6 +7,7 @@ import type { SessionResponse, SessionUser } from "../shared/types.js";
 import {
   BUILT_IN_ADMIN_USERNAME,
   canAdminister,
+  canAskAssistant,
   canOperateRadio,
   type UserRole,
 } from "../shared/roles.js";
@@ -148,7 +149,7 @@ export function requireSession(auth: AuthContext) {
  */
 export function requireCapability(
   auth: AuthContext,
-  capability: "operate" | "administer",
+  capability: "operate" | "administer" | "ask",
 ) {
   return async (
     request: FastifyRequest,
@@ -163,7 +164,9 @@ export function requireCapability(
     const allowed =
       capability === "administer"
         ? canAdminister(user.role)
-        : canOperateRadio(user.role);
+        : capability === "ask"
+          ? canAskAssistant(user.role)
+          : canOperateRadio(user.role);
 
     if (!allowed) {
       request.log.warn(

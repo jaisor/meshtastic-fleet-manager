@@ -3,6 +3,7 @@ import type {
   FleetNode,
   SignalQuality,
 } from "../../shared/types";
+import { matchesTerms, type FleetSortKey } from "../../shared/fleetQuery";
 import { humanizeEnum } from "../components/format";
 
 /**
@@ -17,14 +18,8 @@ import { humanizeEnum } from "../components/format";
  * interesting part is the comparator edge cases rather than the markup.
  */
 
-export type SortKey =
-  | "name"
-  | "lastHeard"
-  | "role"
-  | "battery"
-  | "admin"
-  | "signal"
-  | "hops";
+/** Defined in shared code because the assistant's answers can name one. */
+export type SortKey = FleetSortKey;
 
 export type SortDirection = "asc" | "desc";
 
@@ -136,30 +131,12 @@ export function parseQuery(query: string): string[] {
 }
 
 /**
- * Matches against node ID, both names, and the role in both its raw
- * protobuf spelling and its displayed one — so `CLIENT_MUTE`, `client mute`
- * and plain `mute` all find the same node.
- *
- * Terms are ANDed rather than matched as one substring, so `grg router`
- * finds a node whose short name and role are nowhere near each other in the
- * text. The `!` on a node ID is part of the haystack, so both `!a4c1` and
- * `a4c1` match.
+ * The search box. The matching itself is shared with the assistant's `text`
+ * field (`shared/fleetQuery.ts`), so a typed search and an answered question
+ * cannot disagree about what "matches" means.
  */
 export function matchesQuery(node: FleetNode, terms: string[]): boolean {
-  if (terms.length === 0) return true;
-
-  const haystack = [
-    node.nodeId,
-    node.shortName,
-    node.longName,
-    node.role,
-    humanizeEnum(node.role),
-  ]
-    .filter((part): part is string => Boolean(part))
-    .join(" ")
-    .toLowerCase();
-
-  return terms.every((term) => haystack.includes(term));
+  return matchesTerms(node, terms);
 }
 
 function valueFor(node: FleetNode, key: SortKey): string | number | null {

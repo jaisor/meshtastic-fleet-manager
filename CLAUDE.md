@@ -9,7 +9,8 @@ seeded database, including degraded mode with no radio attached. The Docker imag
 and runs. **First contact with real hardware has happened** — the container is running
 against an ESP32-S3 node — but the mesh paths are still only lightly exercised; §12 is the
 honest list. A radio that went deaf after ~15 minutes was traced to a missing serial
-heartbeat (§4, landmine 5) and is fixed, with a watchdog behind it (§6). Update this line
+heartbeat (§4, landmine 5) and is fixed, with a watchdog behind it (§6). An optional MQTT
+broker feed (JSON) is verified against a local broker, not yet real gateways. Update this line
 and §13 as work lands.
 
 ---
@@ -37,12 +38,18 @@ and remotely reconfiguring them.
 6. **Degraded mode.** With no working radio the console still boots and serves everything
    in the database, read-only, and says so. See §6 — this is a requirement, not a
    fallback.
+7. **Assistant (optional, read-only).** Managers and admins can ask the fleet list a
+   question in plain words; an LLM turns it into a filter. It never acts. See §11.
+8. **MQTT feed (optional, read-only).** A subscription to a broker the fleet's gateways
+   uplink to, as a second source beside the radio. JSON payloads only. It can also admit
+   nodes (`mqtt.discovery`). See §11.
 
 **UI surfaces**
 
 - `/login` — password form.
 - `/` — fleet list: node ID, short name, long name, last check-in, admin-capable badge,
   and a per-row refresh (managers and admins) that asks that node to report in now.
+  With `llm.enabled`, managers and admins also get a question box above it.
   The USB-attached radio is **not** listed; it is the instrument, not a fleet member.
 - `/nodes/:id` — detail: full identity, telemetry history, position, link quality, and
   the remote-configuration form. The local radio's id redirects to `/radio`.
@@ -62,6 +69,8 @@ and remotely reconfiguring them.
 | Protobufs | `@meshtastic/protobufs` | Needed directly — we hand-build admin messages (§5). |
 | Frontend | React 19 + Vite + Tailwind CSS v4 | Same stack as jaisor.net, so the visual language ports over directly. |
 | Config | YAML, mounted into the container | Per requirement. |
+| MQTT | `mqtt` (MQTT.js) 5 | The standard Node client, pure JS, with reconnect built in. Subscribe only. |
+| LLM | Vercel AI SDK (`ai` 7 + `@ai-sdk/google`, `anthropic`, `openai`, `openai-compatible`) | One structured-output call across all four providers, zod schemas, pure JS so no native build. |
 | Packaging | Docker, multi-stage | Per requirement. |
 
 `better-sqlite3` is the pick over the built-in `node:sqlite` because it is mature and has
@@ -115,21 +124,27 @@ vite.config.ts               web build; root is src/web, output dist/web
 tsconfig.server.json         src/server + src/shared -> dist/  (nodenext)
 tsconfig.web.json            src/web + src/shared, noEmit     (bundler)
 src/shared/types.ts          the HTTP contract, imported by BOTH halves
+src/shared/fleetQuery.ts     the assistant's FleetQuery, its evaluator and its description
 src/server/
   index.ts                   bootstrap, wiring, graceful shutdown
   config.ts                  YAML load + zod validation + scrypt password hashing
   auth.ts                    session store, login routes, requireSession hook
+  assistant/index.ts         question -> LLM -> FleetQuery; providers, budget, error mapping
   db/
     index.ts                 connection, pragmas (WAL), migration runner
     migrations.ts            ordered array of {name, sql}; forward-only
     repositories/nodes.ts    nodes, telemetry, positions, settings snapshots
     repositories/adminOperations.ts   the remote-write audit log
     repositories/channels.ts the local radio's channel table (keys included)
+    repositories/assistantQueries.ts  every question asked, its cost; the daily budget
   mesh/
     nodeId.ts                nodeNum <-> "!hex" conversion
     listener.ts              serial connect, reconnect/backoff, event fan-out
     ingest.ts                packet -> repository writes, behind the discovery gate
     discovery.ts             pure admission rules
+    admission.ts             the admission gate both ingests share; recent-packet dedup
+    mqttJson.ts              MQTT JSON payload -> parsed packet; pure
+    mqttFeed.ts              broker connection, subscribe, record; the second writer
     enrich.ts                asks new nodes to introduce themselves
     radioConfig.ts           protobuf config <-> the stored settings snapshot
     admin.ts                 AdminMessage build/send/correlate, session passkey
@@ -139,9 +154,11 @@ src/server/
     tasks.ts                 registry of user-initiated operations + cancellation
   routes/api.ts              HTTP handlers; thin
   routes/radio.ts            the local radio: read-back for all, writes for admins
+  routes/assistant.ts        POST /api/ask; managers and admins
 src/web/
   main.tsx  App.tsx  api.ts  router.ts  index.css  index.html
   components/  Backdrop, Layout, StatusDot, SignalDot, CapabilityBadge,
+               BatteryLevel (fill glyph by level; >100 is external power),
                RadioTaskBanner, format.ts,
                NodeFields (fields, name editor, public key, telemetry, op log),
                RadioSettings (the read-only settings panel)
@@ -151,7 +168,9 @@ src/web/
 ```
 
 Keep the mesh layer free of HTTP concerns and the routes free of protobuf concerns. The
-listener is the only writer to mesh-derived tables.
+mesh-derived tables have exactly two writers: `ingest.ts` (the radio) and `mqttFeed.ts`
+(the broker). Both go through one `AdmissionGate` and one `RecentPackets`, created in
+`index.ts`; a third source must too.
 
 **Migrations live in TypeScript, not `.sql` files.** `db/migrations.ts` exports an ordered
 array of `{name, sql}`. That keeps `dist/` a pure compiled tree with no asset-copy step in
@@ -479,6 +498,13 @@ heard since …”) with the detail in its tooltip, and neither gets a banner �
 resolves or becomes a restart within a minute, and a banner for a quiet mesh would cry wolf.
 With `serial.enabled` or `watchdog.enabled` off, `RadioStatus.watchdog` is null.
 
+**The MQTT feed is independent of the radio** and keeps running in degraded mode: it
+transmits nothing, needs no lock and no radio. With the radio down, nodes the gateways hear
+keep checking in. A broker that is down, unknown or refusing the credentials is retried
+every 10s and reported (the header's MQTT pill, amber, reason in the tooltip), never
+fatal. Only a missing `url`, missing `topic` or unreadable `password_file` is, at startup.
+No banner for it: without the broker only its reports stop, and writing is unaffected.
+
 Node state (`online` / `stale` / `offline`) stays derived from `lastHeardAt`, so with the
 radio down every node decays through those states on its own. That is correct — the
 timestamps are real — and the banner is what explains that nothing new is arriving.
@@ -508,6 +534,12 @@ Notes that are easy to get wrong:
   over argon2 to avoid a third native dependency. A plaintext `auth.password` is hashed at
   load and the plaintext field cleared immediately, so it never reaches the database or a
   log line. `auth` requires exactly one of `password` / `password_hash`.
+- **`llm`'s key** comes from at most one of `api_key_file`, `api_key_env`, `api_key`, and
+  otherwise the provider's own variable (`GOOGLE_GENERATIVE_AI_API_KEY`,
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). It is resolved at load into `config.assistant`
+  and `llm.api_key` is cleared, as with the password. An enabled assistant with no key,
+  an unset named variable, a missing `model` (every provider but google) or a missing
+  `base_url` (`openai_compatible`) is fatal at startup, not a failure on first question.
 - **`secure_cookies`** must be false on plain HTTP. A `Secure` cookie is silently dropped
   by the browser on an `http://` origin, and the symptom is a login that appears to do
   nothing at all.
@@ -534,8 +566,9 @@ remote config, cancelling a task), `admin` also manages accounts, clears collect
 and changes the local radio's settings. Re-reading the local radio is open to `viewer`
 too: it is a USB exchange that transmits nothing, and "viewers never transmit" is the rule
 that matters.
-The capability helpers (`canOperateRadio`, `canAdminister`) are shared rather than
-re-derived from string comparisons on each side.
+The capability helpers (`canOperateRadio`, `canAdminister`, `canAskAssistant`) are shared
+rather than re-derived from string comparisons on each side. Asking the assistant is
+manager and admin only although it is read-only: every question is billed to the owner.
 
 **The server is the only guard.** The UI hides what a role cannot do, but that is an
 affordance — every protected route calls `requireCapability` itself. Verified by hitting
@@ -725,6 +758,36 @@ bloom over near-black.
   `undefined` and sorting the list by `NaN`. Reads and writes are both wrapped: storage can
   simply throw in a private window or with site data blocked, and the list has to render
   anyway — it just stops remembering.
+- **The assistant answers with a filter, never an action** (`assistant/index.ts`,
+  `shared/fleetQuery.ts`, `AskBar` in `pages/Fleet.tsx`). A question goes to the LLM with no
+  tools and no fleet data; the model fills a fixed schema, the server converts it to a
+  `FleetQuery`, and the browser applies it with `matchesFleetQuery` to the list it already
+  holds, beside the search box. The model never decides which nodes match. Read-only by
+  decision, not by omission: changes stay with the per-node controls and their role
+  checks. "Restart abc" returns the filter for abc and a note saying where changes are made.
+  **Node names never enter the prompt.** Anyone on the mesh can name a node anything,
+  including text aimed at a language model; a prompt that never contains them cannot be
+  steered by them. Do not "improve" answers by adding fleet context to the prompt.
+  **What the filter does is described from the query (`describeFleetQuery`), not the
+  model's prose**, so the operator reads what is applied. The model's `note` is shown
+  separately and labelled "Assistant:".
+  **A field that fails validation fails the whole answer.** Every schema field is required
+  and nullable (OpenAI's strict mode rejects optional properties), and a malformed one
+  (`"two days"` for a duration) is a 502, not a dropped constraint: a filter that silently
+  lost a clause shows more nodes than asked for and looks correct.
+  **Roles come from core's bundled protobufs**, the decoder that writes `nodes.role`
+  (§4), so a role the model picks is one a stored node can have.
+  **`maxRetries: 0`.** The SDK retries a 429 with a backoff, which spends a free tier's
+  quota on a refused request and ran into our timeout, so a rate limit was reported as
+  "no answer". **Answers that fail to parse are still billed**: usage is read off
+  `NoObjectGeneratedError` so the budget counts them.
+  **The budget** is input plus output tokens per UTC day across all users, summed from
+  `assistant_queries`, checked before each call; the last question of the day can overrun
+  it by one question. A question refused before reaching the provider is not recorded.
+  The answer persists in `fleetView` with the search, and `sanitizeFleetQuery` rebuilds
+  it field by field on read, for the reason given above for `fleetView.ts`. A sort in an
+  answer is adopted into the sort controls rather than held separately; `limit` applies
+  after the sort; time windows are measured from now on every poll.
 - **Discovery rules gate admission, not updates** (`mesh/discovery.ts`, applied in
   `ingest.ts`). Once a node is in the fleet it is tracked normally whatever arrives next —
   a node admitted by sending "JOIN" on channel 2 would otherwise never record telemetry,
@@ -770,6 +833,44 @@ bloom over near-black.
   rule rather than passing it, since admitting on absent information silently widens the
   policy. `/api/status` carries a `discovery` summary so an empty fleet can distinguish a
   quiet mesh from a filter excluding everything.
+- **The MQTT feed** (`mesh/mqttFeed.ts`, `mesh/mqttJson.ts`) records Meshtastic's JSON
+  uplink format, one packet per message (`MeshPacketSerializer.cpp` in firmware). The node
+  is `from`, a decimal node number; `sender` is the gateway and appears only in logs.
+  `nodeinfo`, `telemetry` (device and environment metrics, recognized by their fields since
+  JSON names no variant), `position` and `text` are parsed; any other type is a check-in.
+  Rules that are easy to regress:
+  **Gateway signal is never recorded.** `rssi`, `snr` and `hops_away` describe the
+  gateway's reception. Writing them to `nodes` would break the "measured by the local
+  radio" meaning above, so they are dropped, and the feed never touches
+  `lastAirPacketAt`.
+  **Duplicates are expected, not rare.** Every gateway that hears a packet publishes its
+  own copy, and the radio may hear it too. `RecentPackets` remembers `(from, id)` for 10
+  minutes. The feed skips a copy outright; the radio still upserts but skips the history
+  inserts (telemetry, positions), since those are the only non-idempotent writes. Both
+  mark a packet only **after** admitting it, so a copy turned away by one source's rules
+  cannot block the other's.
+  **Discovery from the broker** is `mqtt.discovery` (`DiscoveryRules.brokerDiscovery`,
+  evidence `viaBroker`). The message rules apply. The channel rule does not: a JSON
+  packet's `channel` is the *gateway's* channel index, the same category error as the
+  channel hash in `channelEvidence`. The subscribed topic is the channel scope. `include_mqtt`
+  is unrelated: it governs the radio's own MQTT-witnessed records.
+  **Downlink commands are not observations.** `sendtext` / `sendposition` share the topic
+  tree and carry the gateway asked to transmit in `from`, so they are ignored.
+  **An empty nodeinfo carries no role.** Firmware writes unset strings as `""` and the
+  example uplink had no names and hardware 0; role 0 is CLIENT, so the role is believed only
+  when the record has a name or a hardware model.
+  **`resubscribe: false`, one SUBSCRIBE per topic.** Left on, MQTT.js re-subscribes after a
+  reconnect and then answers our own subscribe as already done, with no error, so an ACL
+  refusal read as success. MQTT.js 5 reports a refused topic (SUBACK 128) as an error
+  without naming it, so a refusal can name its topic only if each topic is subscribed alone.
+  Protobuf payloads (`/2/e/`) are counted as ignored, with one warning per connection.
+  **One log line per message, at info by default** (`mqtt.log_messages`; off moves it to
+  debug), carrying the outcome: `admitted`, `recorded`, `duplicate`, `ignored`, or
+  `not admitted` with the reason. The reason comes from `discovery.ts:refusalReason`, which
+  *is* the admission decision (`admits` was folded into it), so the explanation cannot
+  drift from the rule. The gate's own lines carry `source: mqtt | radio`. Message text is
+  logged as a length, not content. Reconnect attempts log at info on the first and every
+  tenth, debug otherwise, since a dead broker retries every 10s.
 - **A newly admitted node is asked to introduce itself** (`mesh/enrich.ts`). Discovery can
   admit on evidence carrying nothing but a node number — a text message says who sent it
   and no more — and the names, hardware and battery would otherwise arrive with that node's
@@ -1139,6 +1240,22 @@ fleet; a probe and a radio re-read both got 503 "connected but has not identifie
 itself"; and headless Edge showed the amber "Radio not responding" pill, the banner, and
 the page naming no radio.
 
+**The assistant is verified against a stub provider** (2026-10-12): the built server with
+`openai_compatible` pointed at a local server playing the OpenAI chat API. Six bad `llm`
+configs each refuse to start, naming the problem. Over HTTP: no session 401, viewer 403,
+empty and over-long questions 400; an answer, an action request (filter plus note) and an
+off-topic question all 200; a 429 is reported as a rate limit, a 401 as a rejected key,
+unparseable output and a malformed field as 502, a slow provider as 504; the budget refuses
+at the configured total and counts failed parses; the key appears in neither the log nor the
+request body, and the request carries only the instructions, the schema and the question
+(about 1,500 input tokens by a chars/4 estimate). Headless Edge, seeded fleet, as manager at
+1280px and 390px: the answer filters and sorts, survives opening a node and coming back,
+combines with the search box, shows the rate-limit error with the draft kept, clears;
+the viewer sees no box; no overflow, console or HTTP errors. The evaluator's edge cases
+(never heard, external power, firmware ordering, sanitizer) are checked by a throwaway
+script. **Not verified against any real provider**: which of Gemini, Claude, OpenAI or a
+local model fills the schema reliably, and the real token count per question.
+
 **An ESP32-S3 on Windows (COM16, `303A:1001`, the built-in USB-Serial/JTAG) sent nothing
 at all** (2026-10-10). The port opened and our `wantConfigId` went out well-formed
 (`94c3 0005 18…`, seen on a temporary byte tap). Not one byte came back across several
@@ -1154,6 +1271,26 @@ binding raises DTR alone (RTS needs `rtscts`), and on an ESP32's USB-Serial/JTAG
 DTR-without-RTS holds GPIO0 low, so any reboot in that state boots the ROM downloader
 instead of Meshtastic. Both up matches a Linux tty, pyserial and Web Serial. It did
 **not** revive this radio, so it is a precaution, not the fix.
+
+**The MQTT feed is verified against a local broker** (2026-10-12): aedes 1.2 in the
+scratchpad, the built server with `serial.enabled: false`, MQTT.js publishing. The
+uplink example from the original request (`!68e05c43`, empty nodeinfo) admits the node
+with no names, hardware or role, at the packet's timestamp. A second gateway's copy and a
+duplicate telemetry packet count as duplicates and write nothing. A named nodeinfo stores
+names, `TBEAM` and `ROUTER`. Device and environment telemetry each make one history row,
+position is stored and 0/0 dropped, and a text admits its sender. No SNR, RSSI or hops are
+written. `sendtext`, a `from` of 0 and protobuf frames are ignored, with one warning. With
+`message_contains: "join"`, telemetry and "hello" from an unknown node are dropped,
+"please JOIN fleet" admits it, and its later telemetry is recorded. Credentials in the URL
+are removed from the status. Restarting the broker reconnects. A refused topic is named in
+the status while the other topic keeps delivering, and still is after a reconnect (the
+`resubscribe` bug above). A wrong password retries with one log line and reports "Bad
+username or password". `mqtt.discovery: false` admits nothing. Four bad `mqtt` configs
+refuse to start, naming the problem. In headless Edge at 390px (DevTools emulation) and
+1280px, the pill renders with no overflow or console errors.
+**Not verified**: a real broker and real gateway JSON beyond the one example. The
+radio-side dedup (history skipped for a packet the feed recorded first) was only
+typechecked, since no radio was attached.
 
 **Not verified, and the first things to check with hardware in hand:**
 
@@ -1194,6 +1331,11 @@ instead of Meshtastic. Both up matches a Linux tty, pyserial and Web Serial. It 
 Next, roughly in order of value:
 
 - Bench-test against a real radio and settle §12, including the watchdog's self-check.
+- Point the MQTT feed at a real broker with real gateways, and check the telemetry field
+  names against what current firmware publishes. Protobuf (`/2/e/`) payloads, including
+  decrypting with a channel key, are the obvious next format.
+- Try the assistant against a real Gemini free-tier key and a local Ollama model, and
+  record which phrasings each gets wrong.
 - A remedy for air silence. Reconnecting cannot help a hung transceiver; an admin
   `rebootSeconds` to the local node would. It needs to be opt-in, taken under the radio
   lock, and limited to once per silent spell, since on a quiet mesh it would otherwise
