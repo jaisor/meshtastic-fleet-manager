@@ -6,6 +6,7 @@ import type {
   AdminCapability,
   ChannelUpdate,
   ConfigReadOutcome,
+  DeviceRole,
   LoRaUpdate,
   NodeConfigUpdate,
   NodeRadioConfig,
@@ -546,26 +547,116 @@ export class AdminClient {
     );
   }
 
+  /** One block of the node's settings, decoded with unknown fields kept. */
+  async getConfig(
+    nodeNum: number,
+    type: Protobuf.Admin.AdminMessage_ConfigType,
+    signal?: AbortSignal,
+  ): Promise<Protobuf.Config.Config> {
+    const response = await this.request(
+      nodeNum,
+      { case: "getConfigRequest", value: type },
+      { withPasskey: false, signal },
+    );
+    if (response.payloadVariant.case !== "getConfigResponse") {
+      throw new AdminError(
+        `could not read ${Protobuf.Admin.AdminMessage_ConfigType[type]}`,
+        "unknown",
+      );
+    }
+    return response.payloadVariant.value;
+  }
+
+  /** As `getConfig`, for the module half of the settings. */
+  async getModuleConfig(
+    nodeNum: number,
+    type: Protobuf.Admin.AdminMessage_ModuleConfigType,
+    signal?: AbortSignal,
+  ): Promise<Protobuf.ModuleConfig.ModuleConfig> {
+    const response = await this.request(
+      nodeNum,
+      { case: "getModuleConfigRequest", value: type },
+      { withPasskey: false, signal },
+    );
+    if (response.payloadVariant.case !== "getModuleConfigResponse") {
+      throw new AdminError(
+        `could not read ${Protobuf.Admin.AdminMessage_ModuleConfigType[type]}`,
+        "unknown",
+      );
+    }
+    return response.payloadVariant.value;
+  }
+
   /** The node's LoRa settings, decoded with unknown fields kept. */
   async getLoRa(
     nodeNum: number,
     signal?: AbortSignal,
   ): Promise<Protobuf.Config.Config_LoRaConfig> {
-    const response = await this.request(
+    const config = await this.getConfig(
       nodeNum,
-      {
-        case: "getConfigRequest",
-        value: Protobuf.Admin.AdminMessage_ConfigType.LORA_CONFIG,
-      },
-      { withPasskey: false, signal },
+      Protobuf.Admin.AdminMessage_ConfigType.LORA_CONFIG,
+      signal,
     );
-    if (
-      response.payloadVariant.case !== "getConfigResponse" ||
-      response.payloadVariant.value.payloadVariant.case !== "lora"
-    ) {
+    if (config.payloadVariant.case !== "lora") {
       throw new AdminError("could not read LoRa settings", "unknown");
     }
-    return response.payloadVariant.value.payloadVariant.value;
+    return config.payloadVariant.value;
+  }
+
+  /** The node's device settings, decoded with unknown fields kept. */
+  private async getDevice(
+    nodeNum: number,
+    signal?: AbortSignal,
+  ): Promise<Protobuf.Config.Config_DeviceConfig> {
+    const config = await this.getConfig(
+      nodeNum,
+      Protobuf.Admin.AdminMessage_ConfigType.DEVICE_CONFIG,
+      signal,
+    );
+    if (config.payloadVariant.case !== "device") {
+      throw new AdminError("could not read device settings", "unknown");
+    }
+    return config.payloadVariant.value;
+  }
+
+  /**
+   * Changes the node's device role.
+   *
+   * `setConfig` replaces the whole device block, so the current one is read and
+   * patched in place, as in `setLoRa`. That read also settles what the node
+   * really holds: the stored role comes from its last NodeInfo and can be stale,
+   * and writing the role it already has would achieve nothing. Firmware skips
+   * its reboot in that case, but `"unchanged"` lets the operation log say so.
+   *
+   * Firmware restarts about five seconds after applying a new role. Unlike
+   * `setLoRa` the node stays on the same channel, so the read-back is worth
+   * making: a missed ACK is usually followed by a node that answers again.
+   */
+  async setRole(
+    nodeNum: number,
+    role: DeviceRole,
+    signal?: AbortSignal,
+  ): Promise<WriteConfirmation | "unchanged"> {
+    const Role = Protobuf.Config.Config_DeviceConfig_Role;
+    const wanted = Role[role];
+    const device = await this.getDevice(nodeNum, signal);
+    if (device.role === wanted) return "unchanged";
+    device.role = wanted;
+
+    const config = create(Protobuf.Config.ConfigSchema, {
+      payloadVariant: { case: "device", value: device },
+    });
+    return this.confirmWrite(
+      nodeNum,
+      { case: "setConfig", value: config },
+      async () => {
+        const current = await this.getDevice(nodeNum, signal);
+        return current.role === wanted
+          ? []
+          : [`the node's role is ${Role[current.role] ?? current.role}`];
+      },
+      signal,
+    );
   }
 
   /**

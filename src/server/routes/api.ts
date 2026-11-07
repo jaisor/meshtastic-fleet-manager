@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AppConfig } from "../config.js";
 import type { NodeRepository } from "../db/repositories/nodes.js";
 import type { AdminOperationRepository } from "../db/repositories/adminOperations.js";
@@ -16,9 +16,19 @@ import type { NodeEnricher } from "../mesh/enrich.js";
 import type { RadioWatchdog } from "../mesh/watchdog.js";
 import type { MqttFeed } from "../mesh/mqttFeed.js";
 import { logNode, parseNodeId } from "../mesh/nodeId.js";
+import { readRawConfig } from "../mesh/rawConfig.js";
 import type { Assistant } from "../assistant/index.js";
+import {
+  isRawConfigSectionId,
+  rawConfigReads,
+  type RawConfigReadResult,
+  type RawConfigSectionId,
+} from "../../shared/rawConfig.js";
+import { DEVICE_ROLES } from "../../shared/types.js";
 import type {
   AssistantStatus,
+  DeviceRole,
+  FleetNode,
   NodeConfigUpdate,
   RadioOccupancy,
   RadioStatus,
@@ -84,6 +94,7 @@ export function registerApiRoutes(
   // Anything that puts the radio to work needs manager or admin. Reads are
   // open to every signed-in role, including viewer.
   const requireOperator = requireCapability(deps.auth, "operate");
+  const requireAdmin = requireCapability(deps.auth, "administer");
 
   app.get("/api/status", async () => ({
     radio: {
@@ -255,6 +266,115 @@ export function registerApiRoutes(
   );
 
   /**
+   * The raw configuration last read from a node, from the database like every
+   * other read. Open to every role: secrets never reach this table.
+   */
+  app.get<{ Params: { id: string } }>(
+    "/api/nodes/:id/config/raw",
+    async (request, reply) => {
+      const nodeNum = parseNodeId(request.params.id);
+      if (nodeNum === null) {
+        return reply.status(400).send({ error: "malformed node id" });
+      }
+      if (!deps.nodes.get(nodeNum)) {
+        return reply.status(404).send({ error: "unknown node" });
+      }
+      return { sections: deps.nodes.rawConfigFor(nodeNum) };
+    },
+  );
+
+  /**
+   * Asks a remote node for the chosen sections of its configuration. Up to
+   * thirty round trips, so the caller picks what it needs and the operation is
+   * a cancellable task. What arrived before a cancel is kept.
+   */
+  app.post<{ Params: { id: string }; Body: { sections?: unknown } }>(
+    "/api/nodes/:id/config/raw",
+    async (request, reply) => {
+      if (!(await requireOperator(request, reply))) return reply;
+
+      const nodeNum = parseNodeId(request.params.id);
+      if (nodeNum === null) {
+        return reply.status(400).send({ error: "malformed node id" });
+      }
+      const node = deps.nodes.get(nodeNum);
+      if (!node) return reply.status(404).send({ error: "unknown node" });
+      if (node.isLocal) {
+        return reply.status(400).send({
+          error: "the local node is read over USB, through /api/radio/config/raw",
+        });
+      }
+      const unavailable = deps.listener.unavailableReason();
+      if (unavailable !== null) {
+        return reply.status(503).send({ error: unavailable });
+      }
+      const sections = validateRawSections(request.body?.sections);
+      if ("error" in sections) {
+        return reply.status(400).send({ error: sections.error });
+      }
+
+      const started = deps.tasks.start({
+        kind: "readConfig",
+        label: "Reading raw configuration",
+        nodeNum,
+        nodeName: node.longName ?? node.shortName ?? null,
+        timeoutSeconds:
+          deps.config.fleet.admin_probe_timeout * rawConfigReads(sections.value),
+      });
+      if (!started) {
+        return reply.status(409).send(busyError(deps.tasks.occupancy()));
+      }
+      const { task, signal } = started;
+
+      try {
+        const { verdict, ...outcome } = await readRawConfig(
+          deps.admin,
+          nodeNum,
+          sections.value,
+          {
+            signal,
+            logger: request.log,
+            onSection: (section, data) => deps.nodes.saveRawConfig(nodeNum, section, data),
+          },
+        );
+        if (outcome.read.length > 0) {
+          // Answering an admin read is proof of admin rights, as for settings.
+          deps.nodes.setAdminCapability(nodeNum, "capable");
+        } else if (verdict) {
+          deps.nodes.setAdminCapability(nodeNum, verdict);
+        }
+        request.log.info(
+          {
+            ...logNode(nodeNum),
+            read: outcome.read.length,
+            failed: outcome.failed.length,
+            skipped: outcome.skipped.length,
+          },
+          "raw configuration read",
+        );
+        if (outcome.read.length === 0) {
+          return reply.status(502).send({
+            error: outcome.failed[0]?.error ?? "the node did not answer",
+          });
+        }
+        return {
+          ...outcome,
+          sections: deps.nodes.rawConfigFor(nodeNum),
+        } satisfies RawConfigReadResult;
+      } catch (cause) {
+        if (cause instanceof TaskCancelledError) {
+          return reply.status(409).send({
+            error: "Cancelled. Any sections that had already arrived are shown.",
+          });
+        }
+        throw cause;
+      } finally {
+        deps.tasks.finish(task.id);
+      }
+    },
+  );
+
+  /**
    * Re-probes admin capability for one node on demand, because waiting out
    * the sweep interval after fixing a node's `adminKey` is a bad workflow.
    */
@@ -402,104 +522,205 @@ export function registerApiRoutes(
       const detail = Object.entries(update.value)
         .map(([key, value]) => `${key}=${value}`)
         .join(", ");
-      const started = deps.tasks.start({
-        kind: "config",
+      return runRemoteWrite(request, reply, node, {
+        kind: "setOwner",
         label: "Applying configuration",
-        nodeNum,
-        nodeName: node.longName ?? node.shortName ?? null,
-        // Read the current owner, write, and -- if the write goes
-        // unacknowledged -- read back: up to three round trips.
-        timeoutSeconds: 3 * deps.config.fleet.admin_probe_timeout,
+        detail,
+        write: async (signal) => {
+          const confirmedBy = await deps.admin.setOwner(
+            nodeNum,
+            update.value,
+            signal,
+          );
+          // The remote is now authoritative for these names; reflect them
+          // locally so the UI does not show the old ones until the next
+          // NodeInfo broadcast, which can be twenty minutes out.
+          deps.nodes.upsert({
+            nodeNum,
+            longName: update.value.longName ?? null,
+            shortName: update.value.shortName ?? null,
+          });
+          return { confirmedBy };
+        },
       });
-
-      if (!started) {
-        return reply.status(409).send(busyError(deps.tasks.occupancy()));
-      }
-      const { task, signal } = started;
-      // Only once the radio is ours: created before, a 409 left a row
-      // pending until the next restart.
-      const operationId = deps.operations.create(nodeNum, "setOwner", detail);
-
-      try {
-        const confirmedBy = await deps.admin.setOwner(
-          nodeNum,
-          update.value,
-          signal,
-        );
-        deps.operations.settle(
-          operationId,
-          "confirmed",
-          confirmedBy === "readback"
-            ? "not acknowledged; confirmed by reading the node back"
-            : null,
-        );
-
-        // The remote is now authoritative for these names; reflect them
-        // locally so the UI does not show the old ones until the next
-        // NodeInfo broadcast, which can be twenty minutes out.
-        deps.nodes.upsert({
-          nodeNum,
-          longName: update.value.longName ?? null,
-          shortName: update.value.shortName ?? null,
-        });
-        deps.nodes.setAdminCapability(nodeNum, "capable");
-
-        return { operationId, state: "confirmed" as const, confirmedBy };
-      } catch (cause) {
-        // Cancelling a write is the ambiguous case: the packet may already
-        // be on the air, so the change may yet land on the node. Record it
-        // as such rather than claiming it failed, and do not touch the
-        // admin verdict -- nothing was established either way.
-        if (cause instanceof TaskCancelledError) {
-          deps.operations.settle(
-            operationId,
-            "failed",
-            "cancelled by operator; the change may still have been applied",
-          );
-          return reply.status(409).send({
-            error:
-              "Cancelled. The request may already have reached the node, so re-check its name before retrying.",
-            operationId,
-            state: "failed" as const,
-          });
-        }
-
-        // Sent, unacknowledged, and the read-back unanswered too. Not a
-        // failure: say so, and leave the admin verdict alone, since nothing
-        // was established either way.
-        if (cause instanceof WriteUnconfirmedError) {
-          deps.operations.settle(operationId, "unconfirmed", cause.message);
-          request.log.warn(
-            { ...logNode(nodeNum), err: cause.message },
-            "remote config unconfirmed",
-          );
-          return reply.status(504).send({
-            error: cause.message,
-            operationId,
-            state: "unconfirmed" as const,
-          });
-        }
-
-        const message =
-          cause instanceof Error ? cause.message : "unknown failure";
-        deps.operations.settle(operationId, "failed", message);
-
-        if (cause instanceof AdminError && cause.capability !== "unknown") {
-          deps.nodes.setAdminCapability(nodeNum, cause.capability);
-        }
-
-        request.log.warn(
-          { ...logNode(nodeNum), err: message },
-          "remote config failed",
-        );
-        return reply
-          .status(502)
-          .send({ error: message, operationId, state: "failed" as const });
-      } finally {
-        deps.tasks.finish(task.id);
-      }
     },
   );
+
+  /**
+   * Changes a remote node's device role. Admin only, a step above the rename a
+   * manager may do: it restarts the node, and firmware rewrites other settings
+   * to the new role's defaults and does not put them back if the role is later
+   * changed again. A role can also harm the mesh around the node, as a badly
+   * placed router does.
+   */
+  app.patch<{ Params: { id: string }; Body: { role?: unknown } }>(
+    "/api/nodes/:id/role",
+    async (request, reply) => {
+      if (!(await requireAdmin(request, reply))) return reply;
+
+      const nodeNum = parseNodeId(request.params.id);
+      if (nodeNum === null) {
+        return reply.status(400).send({ error: "malformed node id" });
+      }
+      const node = deps.nodes.get(nodeNum);
+      if (!node) return reply.status(404).send({ error: "unknown node" });
+      if (node.isLocal) {
+        return reply
+          .status(400)
+          .send({ error: "the local node is configured over USB, through /api/radio/role" });
+      }
+      const unavailable = deps.listener.unavailableReason();
+      if (unavailable !== null) {
+        return reply.status(503).send({ error: unavailable });
+      }
+      const role = validateRole(request.body?.role);
+      if ("error" in role) {
+        return reply.status(400).send({ error: role.error });
+      }
+
+      return runRemoteWrite(request, reply, node, {
+        kind: "setRole",
+        label: `Changing role to ${role.value}`,
+        detail: `role=${role.value}`,
+        write: async (signal) => {
+          const confirmedBy = await deps.admin.setRole(nodeNum, role.value, signal);
+          // Also on "unchanged": the node has just said what it holds, and the
+          // stored role may be the stale one.
+          deps.nodes.upsert({ nodeNum, role: role.value });
+          return { confirmedBy, restarting: confirmedBy !== "unchanged" };
+        },
+      });
+    },
+  );
+
+  /**
+   * One write to a remote node, start to finish: the lock, the audit row, and
+   * turning the outcome into a response. The caller has already checked the
+   * role, the target and that a radio is there.
+   */
+  async function runRemoteWrite(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    node: FleetNode,
+    op: {
+      kind: string;
+      label: string;
+      detail: string;
+      write: (signal: AbortSignal) => Promise<
+        { confirmedBy: "ack" | "readback" | "unchanged" } & Record<string, unknown>
+      >;
+    },
+  ): Promise<FastifyReply | object> {
+    const { nodeNum } = node;
+    const started = deps.tasks.start({
+      kind: "config",
+      label: op.label,
+      nodeNum,
+      nodeName: node.longName ?? node.shortName ?? null,
+      // Read the current value, write, and -- if the write goes
+      // unacknowledged -- read back: up to three round trips.
+      timeoutSeconds: 3 * deps.config.fleet.admin_probe_timeout,
+    });
+
+    if (!started) {
+      return reply.status(409).send(busyError(deps.tasks.occupancy()));
+    }
+    const { task, signal } = started;
+    // Only once the radio is ours: created before, a 409 left a row
+    // pending until the next restart.
+    const operationId = deps.operations.create(nodeNum, op.kind, op.detail);
+
+    try {
+      const result = await op.write(signal);
+      deps.operations.settle(
+        operationId,
+        "confirmed",
+        result.confirmedBy === "readback"
+          ? "not acknowledged; confirmed by reading the node back"
+          : result.confirmedBy === "unchanged"
+            ? "the node already had this value; nothing was written"
+            : null,
+      );
+      deps.nodes.setAdminCapability(nodeNum, "capable");
+
+      return { operationId, state: "confirmed" as const, ...result };
+    } catch (cause) {
+      // Cancelling a write is the ambiguous case: the packet may already
+      // be on the air, so the change may yet land on the node. Record it
+      // as such rather than claiming it failed, and do not touch the
+      // admin verdict -- nothing was established either way.
+      if (cause instanceof TaskCancelledError) {
+        deps.operations.settle(
+          operationId,
+          "failed",
+          "cancelled by operator; the change may still have been applied",
+        );
+        return reply.status(409).send({
+          error:
+            "Cancelled. The request may already have reached the node, so check it before retrying.",
+          operationId,
+          state: "failed" as const,
+        });
+      }
+
+      // Sent, unacknowledged, and the read-back unanswered too. Not a
+      // failure: say so, and leave the admin verdict alone, since nothing
+      // was established either way.
+      if (cause instanceof WriteUnconfirmedError) {
+        deps.operations.settle(operationId, "unconfirmed", cause.message);
+        request.log.warn(
+          { ...logNode(nodeNum), kind: op.kind, err: cause.message },
+          "remote config unconfirmed",
+        );
+        return reply.status(504).send({
+          error: cause.message,
+          operationId,
+          state: "unconfirmed" as const,
+        });
+      }
+
+      const message =
+        cause instanceof Error ? cause.message : "unknown failure";
+      deps.operations.settle(operationId, "failed", message);
+
+      if (cause instanceof AdminError && cause.capability !== "unknown") {
+        deps.nodes.setAdminCapability(nodeNum, cause.capability);
+      }
+
+      request.log.warn(
+        { ...logNode(nodeNum), kind: op.kind, err: message },
+        "remote config failed",
+      );
+      return reply
+        .status(502)
+        .send({ error: message, operationId, state: "failed" as const });
+    } finally {
+      deps.tasks.finish(task.id);
+    }
+  }
+}
+
+/** Shared with the local radio's route. */
+export function validateRole(
+  role: unknown,
+): { value: DeviceRole } | { error: string } {
+  return (DEVICE_ROLES as readonly unknown[]).includes(role)
+    ? { value: role as DeviceRole }
+    : { error: `role must be one of ${DEVICE_ROLES.join(", ")}` };
+}
+
+/** Shared with the local radio's route. */
+export function validateRawSections(
+  sections: unknown,
+): { value: RawConfigSectionId[] } | { error: string } {
+  if (!Array.isArray(sections) || sections.length === 0) {
+    return { error: "sections must be a non-empty list" };
+  }
+  const unknown = sections.find((section) => !isRawConfigSectionId(section));
+  if (unknown !== undefined) {
+    return { error: `unknown section: ${String(unknown)}` };
+  }
+  return { value: sections as RawConfigSectionId[] };
 }
 
 const MAX_LONG_NAME = 39;

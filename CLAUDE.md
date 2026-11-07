@@ -33,7 +33,9 @@ and remotely reconfiguring them.
 3. **Admin-capability probe.** For each known node, determine whether the local node is
    authorized to remotely administer it (see §5) and surface that as a per-node status.
 4. **Remote configuration.** From a node's detail page, change a bounded set of settings
-   on that remote node via Meshtastic admin messages.
+   on that remote node via Meshtastic admin messages: its names, and (admins only) its
+   device role. Its full configuration can be queried and shown as raw JSON, secrets
+   removed.
 5. **Session auth.** Every browser session requires a password defined in the YAML config.
 6. **Degraded mode.** With no working radio the console still boots and serves everything
    in the database, read-only, and says so. See §6 — this is a requirement, not a
@@ -51,10 +53,12 @@ and remotely reconfiguring them.
   and a per-row refresh (managers and admins) that asks that node to report in now.
   With `llm.enabled`, managers and admins also get a question box above it.
   The USB-attached radio is **not** listed; it is the instrument, not a fleet member.
-- `/nodes/:id` — detail: full identity, telemetry history, position, link quality, and
-  the remote-configuration form. The local radio's id redirects to `/radio`.
+- `/nodes/:id` — detail: full identity, telemetry history, position, link quality, raw
+  configuration, and the remote-configuration form. The local radio's id redirects to
+  `/radio`.
 - `/radio` — the local radio (user menu, every role): identity, public key, settings,
-  channels, telemetry, operation log. Re-read for everyone; changes for admins.
+  channels, raw configuration, telemetry, operation log. Re-read for everyone; changes
+  for admins.
 
 ---
 
@@ -125,6 +129,7 @@ tsconfig.server.json         src/server + src/shared -> dist/  (nodenext)
 tsconfig.web.json            src/web + src/shared, noEmit     (bundler)
 src/shared/types.ts          the HTTP contract, imported by BOTH halves
 src/shared/fleetQuery.ts     the assistant's FleetQuery, its evaluator and its description
+src/shared/rawConfig.ts      the raw view's sections, shared by the route and the picker
 src/server/
   index.ts                   bootstrap, wiring, graceful shutdown
   config.ts                  YAML load + zod validation + scrypt password hashing
@@ -147,6 +152,7 @@ src/server/
     mqttFeed.ts              broker connection, subscribe, record; the second writer
     enrich.ts                asks new nodes to introduce themselves
     radioConfig.ts           protobuf config <-> the stored settings snapshot
+    rawConfig.ts             a node's full config as redacted JSON; the sequential read
     admin.ts                 AdminMessage build/send/correlate, session passkey
     capability.ts            periodic admin probe sweep
     watchdog.ts              local-radio self-check, restart on failure, air silence
@@ -161,7 +167,8 @@ src/web/
                BatteryLevel (fill glyph by level; >100 is external power),
                RadioTaskBanner, format.ts,
                NodeFields (fields, name editor, public key, telemetry, op log),
-               RadioSettings (the read-only settings panel)
+               RadioSettings (the read-only settings panel),
+               RawConfig (the section picker and the JSON)
   pages/       Login, Fleet, NodeDetail, Radio, Admin
   pages/fleetOrdering.ts   pure filter + comparator logic for the fleet list
   pages/fleetView.ts       the list's search/sort selections, persisted per tab
@@ -421,7 +428,7 @@ distinct in code and in how the UI explains them.
 Scope the first implementation to a small, safe set of writable settings (owner short/long
 name, device role, a couple of LoRa fields). Every write is confirmed in the UI before
 sending, and logged. Do not expose factory reset, DFU, key material, or channel edits in
-the first pass.
+the first pass. Names and the device role are writable so far; §11 has the role's rules.
 
 ---
 
@@ -562,8 +569,9 @@ name is reserved so a database user can never shadow it. `users.username` carrie
 
 **Three roles**, defined once in `shared/roles.ts` so the server's enforcement and the
 UI's affordances cannot drift: `viewer` reads, `manager` also operates the radio (probe,
-remote config, cancelling a task), `admin` also manages accounts, clears collected data,
-and changes the local radio's settings. Re-reading the local radio is open to `viewer`
+rename, query a node's raw config, cancelling a task), `admin` also manages accounts, clears
+collected data, changes any node's device role, and changes the local radio's settings.
+Re-reading the local radio is open to `viewer`
 too: it is a USB exchange that transmits nothing, and "viewers never transmit" is the rule
 that matters.
 The capability helpers (`canOperateRadio`, `canAdminister`, `canAskAssistant`) are shared
@@ -926,6 +934,51 @@ bloom over near-black.
   slot or region is the one write that cannot be undone from here: the node applies it, leaves
   the channel this console can reach, and is beyond recall without physical access. The
   intervals carry no such risk and are the sensible place to widen writes first.
+- **Changing a node's device role is admin only** (`AdminClient.setRole`,
+  `PATCH /api/nodes/:id/role`, `PATCH /api/radio/role`, `RoleField` in `NodeFields.tsx`). A
+  step above the rename a manager may do, for what firmware does with it (`AdminModule.cpp`
+  and `NodeDB::installRoleDefaults`, checked against `develop` on 2026-11-07): the node
+  **reboots** about 5s later, and `installRoleDefaults` rewrites other settings for the new
+  role, such as intervals, `rebroadcast_mode` and `is_unmessagable`. It has no branch for
+  `CLIENT`, so **changing back does not restore them**; the confirmation says so. Unlike a
+  preset or slot it does not take the node off the channel, so it is writable remotely.
+  **The list is `DEVICE_ROLES`, deliberately short of the enum.** `CLIENT_BASE` is not in
+  core's bundled protobufs (§4), and firmware silently stores `CLIENT` for `ROUTER_CLIENT`
+  and `REPEATER`, so a read-back would call the write not applied. A node already holding one
+  of those shows it as "(current)" and the editor starts with nothing chosen.
+  **The device block is read and patched in place**, as for LoRa, because `setConfig` replaces
+  it whole. That read also settles what the node holds: the stored role comes from its last
+  NodeInfo and can be stale, so the role it already has is answered `unchanged`, writes
+  nothing, and corrects the stored value. Unlike `setLoRa`, the write goes through
+  `confirmWrite`, because the node comes back on the same channel and can answer a read-back.
+  Gated in the UI on a `capable` verdict like the names; the server gates on role and radio.
+- **The raw configuration view** (`mesh/rawConfig.ts`, `node_raw_config`,
+  `components/RawConfig.tsx`) shows what the node answers as JSON, 24 sections and up to 31
+  reads. Querying a remote node is manager and admin, a cancellable task under the radio lock;
+  over USB it is every role with no lock, as with Re-read. Reading what is stored is every role
+  and never touches the radio. Rules that are easy to regress:
+  **Secrets are removed in `redactSecrets`, before storing or sending, for every role.**
+  Firmware withholds the private key, Wi-Fi password and MQTT password from a remote requester,
+  but `from == 0` over USB gets all three, and a channel reply always carries its key. The
+  match is by field name, so a new `apiToken` is withheld by default; it must stay narrow
+  enough to leave GPIO fields (`pttPin`, `monitorPin`) alone. `publicKey` and `adminKey` stay.
+  An unset secret stays visibly unset, and a channel key becomes its `PskKind`.
+  **JSON is encoded with `@meshtastic/protobufs`, not core's copy.** `toJson` drops unknown
+  fields, so going straight from the bundled decoder would lose `femLnaMode` and friends
+  without a word (§4). `toBinary` keeps them, so the bytes are decoded again with the newer
+  schema. A field neither schema knows is listed by number in `$unknownFields`; its value is
+  not shown, since it could be a secret nobody has named yet. `alwaysEmitImplicit` is on
+  because firmware's `0` is a setting.
+  **Sections are stored one row each, as they arrive**, so a partial query keeps its
+  timestamps honest and a cancel keeps what came back. This differs from `node_config` on
+  purpose: that one is a single snapshot.
+  **One refusal or two silences in a row ends the query**, the rest reported as `skipped`,
+  because thirty timeouts would say nothing the first two did not. Any other failure costs
+  only that section, since a build with a module compiled out still answers the rest (it ACKs
+  with no data, which `request` reports as a failure).
+  **The sections are what core can ask for.** Newer modules (`tak`, `statusmessage`, ...) have
+  no `ModuleConfigType` in the bundled copy, `sessionkey` holds nothing, and firmware handles
+  `deviceUi` separately. Purging nodes cascades; purging history leaves it, like `node_config`.
 - **Editing requires a confirmed admin verdict, not just the right role.** The pencil appears
   only when `adminCapability === "capable"` — `capable` specifically, never "anything but
   unauthorized", because `unknown` means nobody has asked yet and treating it as permission
@@ -1300,6 +1353,25 @@ refuse to start, naming the problem. In headless Edge at 390px (DevTools emulati
 radio-side dedup (history skipped for a packet the feed recorded first) was only
 typechecked, since no radio was attached.
 
+**Role changes and the raw view are verified against a stub mesh and in a browser**
+(2026-11-07): a real `MeshDevice` over a stub transport playing firmware, encoding with the
+newer schema, enforcing the session passkey and handing over real secrets on USB, with the
+real routes over HTTP on a temporary database. Role: 403 for viewer and manager on both
+routes; six bad values 400 with no row; confirmed by ACK with our radio's look-alike ignored;
+other device fields and a field no schema knows survive the write; `unchanged` writes nothing
+and corrects a stale stored role; read-back, not-applied (naming the actual role), 504
+unconfirmed and a refusal each behave as §5 says; 409 with a task held and 503 with no radio.
+Raw: `femLnaMode` is recovered through the bundled decoder and an unknown field listed by
+number; keys and enums read correctly; a compiled-out module and a lost channel slot are
+reported without stopping the rest; a silent node stops after two timeouts; a refusal stops at
+once; a cancel keeps what arrived and frees the lock; the USB query works beside a held radio.
+The private key, both passwords, the channel key and the PIN appear in no response, table or
+log line; switching redaction off makes those checks fail, so they do test it. Headless Edge
+at 1280px and 390px, each role: the editor, its two steps, the cost following the picker, what
+each role is shown, no overflow, no console or HTTP errors. **Not verified**: any of it against
+real firmware, above all the reboot after a role change, how the ACK fares against it, and how
+long a real 31-read query takes over several hops.
+
 **Not verified, and the first things to check with hardware in hand:**
 
 - **That a self-addressed admin request is answered over serial the way the stub
@@ -1351,7 +1423,7 @@ Next, roughly in order of value:
   reboot the node every `silence_after`.
 - Telemetry charts on the detail page (the history table is honest about gaps; a chart must
   not draw a line straight through an outage).
-- Widen the writable settings beyond names, one field at a time.
+- Widen the writable settings beyond names and role, one field at a time.
 - A map for position history.
 - Server-sent events instead of the 20s poll, so a newly heard node appears at once.
 

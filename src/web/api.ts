@@ -1,3 +1,8 @@
+import type {
+  RawConfigReadResult,
+  RawConfigSection,
+  RawConfigSectionId,
+} from "../shared/rawConfig";
 import type { UserRole } from "../shared/roles";
 import type {
   AdminCapability,
@@ -6,6 +11,7 @@ import type {
   AssistantStatus,
   ChannelUpdate,
   ConfigReadOutcome,
+  DeviceRole,
   LocalRadioDetail,
   LoRaUpdate,
   FleetNode,
@@ -20,6 +26,7 @@ import type {
   RadioStatus,
   SessionResponse,
   RadioTask,
+  RoleChangeResult,
   TelemetryPoint,
 } from "../shared/types";
 
@@ -171,6 +178,37 @@ export const api = {
       `/api/nodes/${encodeURIComponent(nodeId)}/config/read`,
       { method: "POST" },
     ),
+
+  /** What was last read, from the database. Works for any node, any role. */
+  getRawConfig: (nodeId: string) =>
+    request<{ sections: RawConfigSection[] }>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/config/raw`,
+    ),
+
+  /** One mesh round trip per read. Registers a cancellable task. */
+  queryNodeRawConfig: (nodeId: string, sections: RawConfigSectionId[]) =>
+    request<RawConfigReadResult>(
+      `/api/nodes/${encodeURIComponent(nodeId)}/config/raw`,
+      { method: "POST", body: JSON.stringify({ sections }) },
+    ),
+
+  queryRadioRawConfig: (sections: RawConfigSectionId[]) =>
+    request<RawConfigReadResult>("/api/radio/config/raw", {
+      method: "POST",
+      body: JSON.stringify({ sections }),
+    }),
+
+  updateNodeRole: (nodeId: string, role: DeviceRole) =>
+    request<RoleChangeResult>(`/api/nodes/${encodeURIComponent(nodeId)}/role`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+
+  updateRadioRole: (role: DeviceRole) =>
+    request<RoleChangeResult>("/api/radio/role", {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
 
   getRadio: () => request<LocalRadioDetail>("/api/radio"),
 

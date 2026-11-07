@@ -3,12 +3,15 @@ import { ArrowLeft, RefreshCw, RotateCw } from "lucide-react";
 import { api, ApiError, type NodeDetailResponse } from "../api";
 import type {
   AdminCapability,
+  DeviceRole,
   NodeConfigUpdate,
   RadioOccupancy,
+  RoleChangeResult,
 } from "../../shared/types";
 import { BatteryLevel } from "../components/BatteryLevel";
 import { CapabilityBadge } from "../components/CapabilityBadge";
 import { RadioSettings } from "../components/RadioSettings";
+import { RawConfig } from "../components/RawConfig";
 import {
   EditableField,
   Field,
@@ -16,6 +19,7 @@ import {
   MAX_SHORT_NAME,
   OperationLog,
   PublicKey,
+  RoleField,
   describeOccupancy,
   TelemetryHistory,
   NO_RADIO_HINT,
@@ -35,6 +39,7 @@ export function NodeDetail({
   onBack,
   radioConnected,
   canOperate,
+  canAdminister,
   radioBusy,
   onLocal,
 }: {
@@ -57,6 +62,11 @@ export function NodeDetail({
    * disabled, saying it is the radio.
    */
   canOperate: boolean;
+  /**
+   * Whether this role may change a node's device role, a step above renaming
+   * it: the change restarts the node and rewrites other settings.
+   */
+  canAdminister: boolean;
   /**
    * What currently holds the radio, or null. Includes background sweeps, which
    * never reach the task banner but occupy the radio just the same.
@@ -157,6 +167,15 @@ export function NodeDetail({
     }
   }
 
+  async function saveRole(role: DeviceRole): Promise<RoleChangeResult> {
+    try {
+      return await runExclusive(() => api.updateNodeRole(nodeId, role));
+    } finally {
+      // As for a rename: the operation log gains a row either way.
+      await load();
+    }
+  }
+
   if (error) return <p className="card p-6 text-red-400">{error}</p>;
   if (!detail) return <p className="p-6 text-neutral-500">Loading node…</p>;
 
@@ -177,6 +196,11 @@ export function NodeDetail({
    * Remote administration points at.
    */
   const canEditNames =
+    canOperate && !node.isLocal && node.adminCapability === "capable";
+  const canChangeRole =
+    canAdminister && !node.isLocal && node.adminCapability === "capable";
+  /** An admin read like the others, so it takes the same confirmed verdict. */
+  const canQueryRaw =
     canOperate && !node.isLocal && node.adminCapability === "capable";
 
   /**
@@ -249,10 +273,10 @@ export function NodeDetail({
         )}
 
         <dl className="mt-6 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-4">
-          {/* The names are the only remotely writable settings, so they are
-              the only fields carrying a pencil. The local node is excluded:
-              it is configured over USB and the server refuses a remote write
-              to it, so offering the control would be a dead end. */}
+          {/* The names and the role are the only remotely writable settings, so
+              they are the only fields carrying a pencil. The local node is
+              excluded: it is configured over USB and the server refuses a remote
+              write to it, so offering the control would be a dead end. */}
           <EditableField
             label="Long name"
             value={node.longName}
@@ -277,7 +301,13 @@ export function NodeDetail({
             {relativeTime(node.firstSeenAt)}
           </Field>
           <Field label="Hardware">{humanizeEnum(node.hwModel) ?? "—"}</Field>
-          <Field label="Role">{humanizeEnum(node.role) ?? "—"}</Field>
+          <RoleField
+            role={node.role}
+            target="this node"
+            canEdit={canChangeRole}
+            disabledReason={blockedReason}
+            onSave={saveRole}
+          />
           <Field label="Firmware" mono>
             {node.firmwareVersion ?? "—"}
           </Field>
@@ -315,6 +345,20 @@ export function NodeDetail({
         blockedReason={blockedReason}
         runExclusive={runExclusive}
         onRead={() => void load()}
+      />
+
+      <RawConfig
+        nodeId={nodeId}
+        overUsb={false}
+        canQuery={canQueryRaw}
+        notQueryableHint={
+          !canOperate
+            ? "Not queried yet. Querying a node's configuration needs the manager or admin role."
+            : "Not queried yet. This has to be requested from the node, which needs confirmed admin rights. Probe it first, under Remote administration below."
+        }
+        blockedReason={blockedReason}
+        query={(sections) => api.queryNodeRawConfig(nodeId, sections)}
+        runExclusive={runExclusive}
       />
 
       {latest && (
@@ -507,7 +551,7 @@ function RemoteConfig({
       {canOperate && (
         <p className="text-sm text-neutral-400">
           {node.adminCapability === "capable"
-            ? "The writable settings — long and short name — are edited in place at the top of this page."
+            ? "The writable settings — long and short name, and for admins the role — are edited in place at the top of this page."
             : "The writable settings become editable at the top of this page once a probe confirms this node accepts administration from the local node."}
         </p>
       )}

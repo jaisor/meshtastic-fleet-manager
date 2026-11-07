@@ -20,11 +20,13 @@ import {
   MAX_SHORT_NAME,
   OperationLog,
   PublicKey,
+  RoleField,
   TelemetryHistory,
   describeOccupancy,
 } from "../components/NodeFields";
 import { BatteryLevel } from "../components/BatteryLevel";
 import { RadioSettings } from "../components/RadioSettings";
+import { RawConfig } from "../components/RawConfig";
 import { StatusDot } from "../components/StatusDot";
 import { absoluteTime, humanizeEnum, relativeTime } from "../components/format";
 
@@ -255,7 +257,13 @@ export function Radio({
                 {relativeTime(node.lastHeardAt)}
               </Field>
               <Field label="Hardware">{humanizeEnum(node.hwModel) ?? "—"}</Field>
-              <Field label="Role">{humanizeEnum(node.role) ?? "—"}</Field>
+              <RoleField
+                role={node.role}
+                target="the radio"
+                canEdit={canAdminister}
+                disabledReason={blockedReason}
+                onSave={(role) => runWrite(() => api.updateRadioRole(role))}
+              />
               <Field label="Firmware" mono>
                 {node.firmwareVersion ?? "—"}
               </Field>
@@ -295,6 +303,22 @@ export function Radio({
             canAdminister={canAdminister}
             blockedReason={blockedReason}
             runWrite={runWrite}
+          />
+
+          <RawConfig
+            nodeId={node.nodeId}
+            overUsb
+            canQuery
+            notQueryableHint=""
+            // Not `blockedReason`: this takes no radio lock, as with Re-read.
+            blockedReason={
+              !radioConnected
+                ? NO_RADIO_HINT
+                : radioNodeNum === null
+                  ? UNIDENTIFIED_HINT
+                  : null
+            }
+            query={(sections) => api.queryRadioRawConfig(sections)}
           />
 
           <TelemetryHistory points={detail.telemetry} />

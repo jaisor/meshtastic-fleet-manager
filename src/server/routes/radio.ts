@@ -7,17 +7,21 @@ import type {
   ModemPreset,
 } from "../../shared/types.js";
 import { MODEM_PRESETS } from "../../shared/types.js";
+import type { RawConfigReadResult } from "../../shared/rawConfig.js";
 import { canAdminister } from "../../shared/roles.js";
 import { currentUser, requireCapability } from "../auth.js";
 import type { ChannelRepository } from "../db/repositories/channels.js";
 import { AdminError, WriteUnconfirmedError } from "../mesh/admin.js";
 import { readLocalRadio } from "../mesh/localRadio.js";
 import { logNode } from "../mesh/nodeId.js";
+import { readRawConfig } from "../mesh/rawConfig.js";
 import { channelFromProto, pskKind } from "../mesh/radioConfig.js";
 import { TaskCancelledError } from "../mesh/tasks.js";
 import {
   busyError,
   validateConfigUpdate,
+  validateRawSections,
+  validateRole,
   type ApiDependencies,
 } from "./api.js";
 
@@ -128,6 +132,61 @@ export function registerRadioRoutes(
     }
   });
 
+  /**
+   * The radio's raw configuration, over USB. Open to every role and takes no
+   * lock, for the same reasons as the re-read above. This is the one path where
+   * firmware hands over the private key and the Wi-Fi and MQTT passwords, which
+   * `mesh/rawConfig.ts` removes before they get any further.
+   */
+  app.post<{ Body: { sections?: unknown } }>(
+    "/api/radio/config/raw",
+    async (request, reply) => {
+      const nodeNum = deps.listener.getStatus().localNodeNum;
+      const blocked = deps.listener.unavailableReason();
+      if (blocked !== null || nodeNum === null) {
+        return reply.status(503).send({ error: blocked ?? "local radio is not connected" });
+      }
+      const sections = validateRawSections(request.body?.sections);
+      if ("error" in sections) {
+        return reply.status(400).send({ error: sections.error });
+      }
+
+      const outcome = await readRawConfig(deps.admin, nodeNum, sections.value, {
+        logger: request.log,
+        onSection: (section, data) => deps.nodes.saveRawConfig(nodeNum, section, data),
+      });
+      if (outcome.read.length === 0) {
+        return reply.status(502).send({
+          error: outcome.failed[0]?.error ?? "the radio did not answer",
+        });
+      }
+      return {
+        read: outcome.read,
+        failed: outcome.failed,
+        skipped: outcome.skipped,
+        sections: deps.nodes.rawConfigFor(nodeNum),
+      } satisfies RawConfigReadResult;
+    },
+  );
+
+  app.patch<{ Body: { role?: unknown } }>("/api/radio/role", async (request, reply) => {
+    if (!(await requireAdmin(request, reply))) return reply;
+    const role = validateRole(request.body?.role);
+    if ("error" in role) {
+      return reply.status(400).send({ error: role.error });
+    }
+    return runLocalWrite(request, reply, {
+      kind: "setRole",
+      label: `Changing the local radio's role to ${role.value}`,
+      detail: `role=${role.value}`,
+      write: async (nodeNum, signal) => {
+        const confirmedBy = await deps.admin.setRole(nodeNum, role.value, signal);
+        deps.nodes.upsert({ nodeNum, role: role.value });
+        return { confirmedBy, restarting: confirmedBy !== "unchanged" };
+      },
+    });
+  });
+
   app.patch<{ Body: { longName?: string; shortName?: string } }>(
     "/api/radio/owner",
     async (request, reply) => {
@@ -228,7 +287,7 @@ export function registerRadioRoutes(
       write: (
         nodeNum: number,
         signal: AbortSignal,
-      ) => Promise<{ confirmedBy: "ack" | "readback"; restarting?: boolean }>;
+      ) => Promise<{ confirmedBy: "ack" | "readback" | "unchanged"; restarting?: boolean }>;
     },
   ): Promise<FastifyReply | object> {
     const nodeNum = deps.listener.getStatus().localNodeNum;
@@ -258,7 +317,9 @@ export function registerRadioRoutes(
         "confirmed",
         result.confirmedBy === "readback"
           ? "not acknowledged; confirmed by reading the radio back"
-          : null,
+          : result.confirmedBy === "unchanged"
+            ? "the radio already had this value; nothing was written"
+            : null,
       );
       request.log.info(
         { ...logNode(nodeNum), kind: op.kind, detail: op.detail },

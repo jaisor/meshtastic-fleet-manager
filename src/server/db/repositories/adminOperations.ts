@@ -46,7 +46,7 @@ export class AdminOperationRepository {
                 error_text AS errorText, created_at AS createdAt,
                 settled_at AS settledAt
          FROM admin_operations WHERE node_num = ?
-         ORDER BY created_at DESC LIMIT ?`,
+         ORDER BY created_at DESC, id DESC LIMIT ?`,
       )
       .all(nodeNum, limit);
   }

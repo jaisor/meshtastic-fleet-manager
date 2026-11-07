@@ -1,13 +1,17 @@
 import { useState } from "react";
 import { Check, Copy, Pencil, X } from "lucide-react";
 import { ApiError } from "../api";
-import type {
-  AdminOperation,
-  RadioOccupancy,
-  TelemetryPoint,
+import {
+  DEVICE_ROLE_DESCRIPTIONS,
+  DEVICE_ROLES,
+  type AdminOperation,
+  type DeviceRole,
+  type RadioOccupancy,
+  type RoleChangeResult,
+  type TelemetryPoint,
 } from "../../shared/types";
 import { BatteryLevel } from "./BatteryLevel";
-import { absoluteTime, metric, relativeTime } from "./format";
+import { absoluteTime, humanizeEnum, metric, relativeTime } from "./format";
 
 /**
  * Fields shared by the node page and the Radio page: a labeled value, the
@@ -17,6 +21,11 @@ import { absoluteTime, metric, relativeTime } from "./format";
 
 export const MAX_LONG_NAME = 39;
 export const MAX_SHORT_NAME = 4;
+
+export const ACTION_BUTTON =
+  "inline-flex items-center gap-2 rounded-lg border border-neutral-800 px-3 py-1.5 text-xs text-neutral-400 transition [corner-shape:bevel] hover:border-amber-500/40 hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-neutral-800 disabled:hover:text-neutral-400";
+const PRIMARY_ACTION_BUTTON =
+  "inline-flex items-center gap-2 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-neutral-950 transition [corner-shape:bevel] hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40";
 
 export function Field({
   label,
@@ -194,6 +203,187 @@ export function EditableField({
           ? "Sending over the mesh…"
           : (disabledReason ?? "Enter to send, Escape to discard.")}
       </p>
+      {failure && <FailureNote failure={failure} />}
+    </div>
+  );
+}
+
+/**
+ * The device role, with an editor behind a pencil for admins.
+ *
+ * Confirmed in a second step, unlike a rename, because the consequences are not
+ * visible from the form: the node restarts, and firmware rewrites other settings
+ * to the role's defaults and leaves them that way if the role is changed back.
+ * As with `EditableField`, the editor stays open with the choice intact until
+ * the node confirms.
+ */
+export function RoleField({
+  role,
+  target,
+  canEdit,
+  disabledReason,
+  onSave,
+}: {
+  role: string | null;
+  /** How the confirmation names what restarts: "this node", "the radio". */
+  target: string;
+  /** False renders a plain field with no affordance at all. */
+  canEdit: boolean;
+  /** Non-null shows the pencil but disabled, with this as the reason. */
+  disabledReason: string | null;
+  onSave: (role: DeviceRole) => Promise<RoleChangeResult>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [failure, setFailure] = useState<{ text: string; uncertain: boolean } | null>(null);
+
+  // A role this console will not set (deprecated, or newer than its decoder)
+  // has no entry in the list, so the editor starts on "choose" rather than
+  // silently preselecting something else.
+  const settable = (DEVICE_ROLES as readonly (string | null)[]).includes(role);
+  const chosen = (DEVICE_ROLES as readonly string[]).includes(draft)
+    ? (draft as DeviceRole)
+    : null;
+
+  function open() {
+    setDraft(settable ? (role as string) : "");
+    setConfirming(false);
+    setFailure(null);
+    setNote(null);
+    setEditing(true);
+  }
+
+  async function apply() {
+    if (!chosen) return;
+    setBusy(true);
+    setFailure(null);
+    try {
+      const result = await onSave(chosen);
+      setEditing(false);
+      setNote(
+        result.restarting
+          ? `Changed to ${humanizeEnum(chosen)}. It restarts to apply this and will be off the air for a short while; re-read its settings afterward, since the role may have changed them.`
+          : `It already had the role ${humanizeEnum(chosen)}, so nothing was sent.`,
+      );
+    } catch (cause) {
+      setConfirming(false);
+      setFailure({
+        text: cause instanceof ApiError ? cause.message : "the change did not go through",
+        // 504 is the server's "sent, unconfirmed" -- see the config route.
+        uncertain: cause instanceof ApiError && cause.status === 504,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!editing) {
+    return (
+      <div className={note || failure ? "col-span-full" : undefined}>
+        <dt className="text-xs tracking-wide text-neutral-500 uppercase">Role</dt>
+        <dd className="mt-1 flex items-center gap-1.5 text-sm text-neutral-200">
+          <span className="truncate">{humanizeEnum(role) ?? "—"}</span>
+          {canEdit && (
+            <button
+              type="button"
+              onClick={open}
+              disabled={disabledReason !== null}
+              title={disabledReason ?? `Change the role of ${target}`}
+              className="shrink-0 rounded p-0.5 text-neutral-600 transition hover:text-amber-400 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-neutral-600"
+            >
+              <Pencil aria-hidden className="h-3.5 w-3.5" />
+              <span className="sr-only">Change role</span>
+            </button>
+          )}
+        </dd>
+        {note && (
+          <p role="status" className="mt-1 text-xs text-emerald-300">
+            {note}
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="col-span-full">
+      <dt className="text-xs tracking-wide text-neutral-500 uppercase">Role</dt>
+      <dd className="mt-1 space-y-2">
+        <select
+          autoFocus
+          value={draft}
+          disabled={busy || confirming}
+          aria-label="Role"
+          onChange={(event) => setDraft(event.target.value)}
+          className="w-full max-w-xs rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 [corner-shape:bevel] focus:border-amber-500/60 focus:outline-none disabled:text-neutral-500"
+        >
+          {!settable && (
+            <option value="">{humanizeEnum(role) ?? "Unknown"} (current)</option>
+          )}
+          {DEVICE_ROLES.map((name) => (
+            <option key={name} value={name}>
+              {humanizeEnum(name)}
+              {name === role ? " (current)" : ""}
+            </option>
+          ))}
+        </select>
+        {chosen && (
+          <p className="text-xs text-neutral-400">{DEVICE_ROLE_DESCRIPTIONS[chosen]}</p>
+        )}
+
+        {confirming ? (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200/90 [corner-shape:bevel]">
+            <p>
+              Change {target} to {humanizeEnum(chosen)}? It restarts to apply this.
+              Depending on the role, firmware also resets broadcast intervals,
+              telemetry and rebroadcast behavior to that role&rsquo;s defaults, and
+              changing the role back does not restore them.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void apply()}
+                disabled={busy || disabledReason !== null}
+                title={disabledReason ?? undefined}
+                className={PRIMARY_ACTION_BUTTON}
+              >
+                {busy ? "Sending…" : "Change role"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                disabled={busy}
+                className={ACTION_BUTTON}
+              >
+                Back
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              disabled={!chosen || chosen === role || disabledReason !== null}
+              title={disabledReason ?? undefined}
+              className={ACTION_BUTTON}
+            >
+              Continue
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              className={ACTION_BUTTON}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+        {disabledReason && <p className="text-xs text-neutral-500">{disabledReason}</p>}
+      </dd>
       {failure && <FailureNote failure={failure} />}
     </div>
   );

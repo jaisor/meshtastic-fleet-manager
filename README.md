@@ -17,8 +17,10 @@ web console for viewing their state and remotely reconfiguring them.
   is useful before the next packet arrives.
 - **Admin-capability probing.** Establishes which nodes accept admin messages from the
   local node, and distinguishes *refused* from *out of range*.
-- **Remote configuration.** Rename a remote node over the mesh, with the outcome confirmed
-  rather than assumed.
+- **Remote configuration.** Rename a remote node over the mesh, or (admins) change its device
+  role, with the outcome confirmed rather than assumed.
+- **Raw configuration.** Query a node's full configuration and read it as JSON. Private keys,
+  passwords, PINs and channel keys are removed on the server, for every role.
 - **Link quality at a glance.** Each node carries a good / medium / bad signal label
   derived from the last SNR and RSSI, plus how many relays away it is.
 - **Search and sort.** Filter the fleet as you type across node ID, short and long name, and
@@ -162,8 +164,8 @@ username, visible to admins — with one of three roles:
 
 | Role | Can do |
 | --- | --- |
-| `admin` | Everything, including accounts and clearing the node database |
-| `manager` | Read everything, and use the radio — probe nodes, change their configuration |
+| `admin` | Everything, including device roles, accounts and clearing the node database |
+| `manager` | Read everything, and use the radio — probe nodes, query their configuration, rename them |
 | `viewer` | Read-only; never transmits |
 
 Changing a role or resetting a password signs that account out immediately, so a demotion

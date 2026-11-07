@@ -1,3 +1,8 @@
+import {
+  RAW_CONFIG_SECTIONS,
+  type RawConfigSection,
+  type RawConfigSectionId,
+} from "../../../shared/rawConfig.js";
 import type { Db } from "../index.js";
 import type {
   AdminCapability,
@@ -519,6 +524,34 @@ export class NodeRepository {
       )
       .get(nodeNum);
     return row ? toRadioConfig(row) : null;
+  }
+
+  /** Replaces one section of a node's raw configuration. */
+  saveRawConfig(nodeNum: number, section: RawConfigSectionId, data: unknown): void {
+    this.db
+      .prepare(
+        `INSERT INTO node_raw_config (node_num, section, fetched_at, json)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(node_num, section) DO UPDATE SET
+           fetched_at = excluded.fetched_at,
+           json = excluded.json`,
+      )
+      .run(nodeNum, section, nowSeconds(), JSON.stringify(data));
+  }
+
+  /** Every stored section, in the order the view lists them. */
+  rawConfigFor(nodeNum: number): RawConfigSection[] {
+    const rows = this.db
+      .prepare<[number], { section: string; fetched_at: number; json: string }>(
+        "SELECT section, fetched_at, json FROM node_raw_config WHERE node_num = ?",
+      )
+      .all(nodeNum);
+    return RAW_CONFIG_SECTIONS.flatMap(({ id }) => {
+      const row = rows.find((candidate) => candidate.section === id);
+      return row
+        ? [{ section: id, fetchedAt: row.fetched_at, data: JSON.parse(row.json) as unknown }]
+        : [];
+    });
   }
 
   /** Drops history older than `retention` seconds. Node rows are kept. */

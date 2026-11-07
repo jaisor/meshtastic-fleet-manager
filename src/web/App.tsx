@@ -206,6 +206,7 @@ export function App() {
             // open: a radio that never answers cannot carry a probe either.
             radioConnected={(radio?.connected ?? false) && radio?.localNodeNum != null}
             canOperate={canOperateRadio(user.role)}
+            canAdminister={canAdminister(user.role)}
             radioBusy={radioBusy}
             onLocal={openRadio}
           />

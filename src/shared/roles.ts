@@ -13,9 +13,9 @@ export const USER_ROLES: UserRole[] = ["admin", "manager", "viewer"];
 
 export const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
   admin:
-    "Everything a manager can do, plus changing the local radio's settings, managing user accounts and clearing the node database.",
+    "Everything a manager can do, plus changing any node's device role, changing the local radio's settings, managing user accounts and clearing the node database.",
   manager:
-    "Read everything, and use the radio — probe nodes for admin access and change their configuration.",
+    "Read everything, and use the radio — probe nodes for admin access, read their settings and rename them.",
   viewer:
     "Read-only. Can see the fleet and re-read the local radio over USB, but never transmits.",
 };
@@ -35,8 +35,9 @@ export function canOperateRadio(role: UserRole): boolean {
 
 /**
  * May manage accounts, destroy collected data, and change the local radio's
- * settings -- the last because a preset, slot or channel change moves the
- * whole console onto a different mesh.
+ * settings -- because a preset, slot or channel change moves the whole console
+ * onto a different mesh -- and any node's device role, which restarts the node
+ * and rewrites other settings to that role's defaults.
  */
 export function canAdminister(role: UserRole): boolean {
   return role === "admin";

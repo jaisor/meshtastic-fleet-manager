@@ -220,4 +220,20 @@ export const migrations: Migration[] = [
       CREATE INDEX assistant_queries_created_at ON assistant_queries (created_at);
     `,
   },
+  {
+    name: "008_node_raw_config",
+    sql: `
+      -- A node's configuration as JSON, one row per section, for the raw view.
+      -- Per section rather than one document like node_config, because a query
+      -- may ask for only some of them: each timestamp says when that section
+      -- was true. Secrets are removed before anything is written here.
+      CREATE TABLE node_raw_config (
+        node_num    INTEGER NOT NULL REFERENCES nodes(node_num) ON DELETE CASCADE,
+        section     TEXT NOT NULL,
+        fetched_at  INTEGER NOT NULL,
+        json        TEXT NOT NULL,
+        PRIMARY KEY (node_num, section)
+      );
+    `,
+  },
 ];

@@ -251,6 +251,50 @@ export interface LocalRadioDetail {
   lastIdentified: { node: FleetNode; at: number } | null;
 }
 
+/**
+ * Device roles that can be set from here.
+ *
+ * Names the decoder in `@meshtastic/core` knows, for the reason given at
+ * `MODEM_PRESETS`: that leaves out `CLIENT_BASE`. `ROUTER_CLIENT` and `REPEATER`
+ * are left out as well, because firmware silently stores `CLIENT` instead, and
+ * the write would then be reported as not applied.
+ */
+export const DEVICE_ROLES = [
+  "CLIENT",
+  "CLIENT_MUTE",
+  "CLIENT_HIDDEN",
+  "TRACKER",
+  "LOST_AND_FOUND",
+  "SENSOR",
+  "TAK",
+  "TAK_TRACKER",
+  "ROUTER",
+  "ROUTER_LATE",
+] as const;
+export type DeviceRole = (typeof DEVICE_ROLES)[number];
+
+/**
+ * What each role does, as firmware's `installRoleDefaults` and the protobuf
+ * documentation describe it. Shown before the change is sent, because the
+ * consequence of a role is otherwise not visible from its name.
+ */
+export const DEVICE_ROLE_DESCRIPTIONS: Record<DeviceRole, string> = {
+  CLIENT: "The normal role: sends, receives and rebroadcasts.",
+  CLIENT_MUTE: "Sends and receives, but does not rebroadcast for others.",
+  CLIENT_HIDDEN:
+    "Stays off the air: stops its node info, position and telemetry broadcasts, so it will decay to offline in this console.",
+  TRACKER: "Prioritizes position broadcasts. Can no longer be messaged directly.",
+  LOST_AND_FOUND: "Broadcasts its position every five minutes, to help find a lost device.",
+  SENSOR:
+    "Prioritizes telemetry and turns environment readings on. Can no longer be messaged directly.",
+  TAK: "For use with ATAK. Node info and position broadcasts drop to once a day.",
+  TAK_TRACKER: "A standalone position beacon for ATAK, broadcasting every few minutes.",
+  ROUTER:
+    "Infrastructure for a well-placed site: always rebroadcasts, ahead of other nodes. On a poorly placed node this harms the whole mesh. Broadcast intervals are reset to their defaults.",
+  ROUTER_LATE:
+    "Infrastructure that rebroadcasts only after other nodes have had their chance, to fill coverage gaps.",
+};
+
 /** A LoRa change. Selecting a preset also turns on preset mode. */
 export interface LoRaUpdate {
   modemPreset?: ModemPreset;
@@ -275,6 +319,15 @@ export interface ConfigReadOutcome {
   device: boolean;
   position: boolean;
   telemetry: boolean;
+}
+
+/** The outcome of a role change. `unchanged` means nothing was written. */
+export interface RoleChangeResult {
+  operationId: number;
+  state: "confirmed";
+  confirmedBy: "ack" | "readback" | "unchanged";
+  /** Firmware restarts the node to apply a new role. */
+  restarting: boolean;
 }
 
 export interface NodeDetail {
