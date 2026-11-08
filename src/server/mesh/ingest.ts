@@ -95,6 +95,44 @@ function hopsTravelled(packet: Protobuf.Mesh.MeshPacket): number | null {
   return hops >= 0 ? hops : null;
 }
 
+/**
+ * What a node's own configuration says about the fields kept on its row: the
+ * role from its device block, its public key from its security block.
+ *
+ * Called for every config answer, whoever asked and why -- the settings read,
+ * the raw query, a role write's own reads, the local radio's read-back and
+ * its USB dump -- so whichever query last reached the node, the row agrees
+ * with it. The role is recorded as confirmed (see `NodeUpsert.roleSource`),
+ * because this is the value firmware acts on, where NodeInfo carries a copy
+ * that is refreshed only at boot.
+ *
+ * Fields core's bundled decoder does not know are simply absent (CLAUDE.md
+ * section 4); neither of these is one of them.
+ */
+export function recordConfigFacts(
+  nodes: NodeRepository,
+  nodeNum: number,
+  config: Protobuf.Config.Config,
+): void {
+  switch (config.payloadVariant.case) {
+    case "device": {
+      const role = enumName(
+        Protobuf.Config.Config_DeviceConfig_Role,
+        config.payloadVariant.value.role,
+      );
+      if (role !== null) nodes.upsert({ nodeNum, role, roleSource: "config" });
+      return;
+    }
+    case "security": {
+      const key = config.payloadVariant.value.publicKey;
+      if (key.length > 0) nodes.upsert({ nodeNum, publicKey: key });
+      return;
+    }
+    default:
+      return;
+  }
+}
+
 export function attachIngest(
   listener: MeshListener,
   nodes: NodeRepository,
@@ -161,6 +199,13 @@ export function attachIngest(
   let localConfig = emptyRadioConfig(nowSeconds());
   let localConfigRead = false;
 
+  /**
+   * Device and security blocks from the local dump, held until the node
+   * number is known, as the snapshot and channels are. Only the latest of
+   * each matters, since each replaces what it describes.
+   */
+  const pendingFacts = new Map<string, Protobuf.Config.Config>();
+
   listener.on("connected", () => {
     localConfig = emptyRadioConfig(nowSeconds());
     localConfigRead = false;
@@ -170,6 +215,8 @@ export function attachIngest(
   // `wantConfigId` is sent, and `MyNodeInfo` can already have arrived by then.
   listener.on("disconnected", () => {
     localNodeNum = null;
+    // Unflushed blocks belong to a radio that has gone; the next one may differ.
+    pendingFacts.clear();
   });
 
   /**
@@ -189,7 +236,19 @@ export function attachIngest(
   // These two fire only for the local radio's own dump; the listener drops
   // the library's duplicate dispatch for remote admin responses, which the
   // AdminClient correlates by requestId instead.
+  function flushLocalFacts(): void {
+    if (localNodeNum === null) return;
+    for (const config of pendingFacts.values()) {
+      recordConfigFacts(nodes, localNodeNum, config);
+    }
+    pendingFacts.clear();
+  }
+
   listener.on("localConfig", (config: Protobuf.Config.Config) => {
+    if (config.payloadVariant.case !== undefined) {
+      pendingFacts.set(config.payloadVariant.case, config);
+      flushLocalFacts();
+    }
     if (!applyConfig(localConfig, config)) return;
     localConfigRead = true;
     saveLocalConfig();
@@ -238,6 +297,7 @@ export function attachIngest(
     // reorders the snapshot would sit in memory with nowhere to go.
     saveLocalConfig();
     flushLocalChannels();
+    flushLocalFacts();
   });
 
   /**
@@ -266,6 +326,8 @@ export function attachIngest(
       longName: info.user?.longName || null,
       hwModel: enumName(Protobuf.Mesh.HardwareModel, info.user?.hwModel),
       role: enumName(Protobuf.Config.Config_DeviceConfig_Role, info.user?.role),
+      // The radio's copy, possibly from before the node's last role change.
+      roleSource: "cache",
       publicKey: info.user?.publicKey?.length ? info.user.publicKey : null,
       lastHeardAt: resolveTime(info.lastHeard),
       snr: zeroAsNull(info.snr),
@@ -282,7 +344,10 @@ export function attachIngest(
       shortName: packet.data.shortName || null,
       longName: packet.data.longName || null,
       hwModel: enumName(Protobuf.Mesh.HardwareModel, packet.data.hwModel),
+      // A broadcast, or the answer to an owner read: either way the owner
+      // record's copy, which lags a role change until the node restarts.
       role: enumName(Protobuf.Config.Config_DeviceConfig_Role, packet.data.role),
+      roleSource: "broadcast",
       publicKey: packet.data.publicKey?.length ? packet.data.publicKey : null,
       lastHeardAt: Math.floor(packet.rxTime.getTime() / 1000),
     });
@@ -450,7 +515,14 @@ export function attachIngest(
       nodes.upsert({
         nodeNum: packet.from,
         firmwareVersion: packet.data.firmwareVersion || null,
+        // Firmware fills this from `config.device.role`, so unlike NodeInfo it
+        // reflects a role write before the node restarts.
         role: enumName(Protobuf.Config.Config_DeviceConfig_Role, packet.data.role),
+        roleSource: "config",
+        // 0 is UNSET, not a model.
+        hwModel: packet.data.hwModel
+          ? enumName(Protobuf.Mesh.HardwareModel, packet.data.hwModel)
+          : null,
         lastHeardAt: Math.floor(packet.rxTime.getTime() / 1000),
       });
     },

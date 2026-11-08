@@ -162,7 +162,13 @@ export const api = {
 
   refreshNode: (nodeId: string) =>
     request<{
-      received: { identity: boolean; metrics: boolean; position: boolean };
+      received: {
+        identity: boolean;
+        metrics: boolean;
+        position: boolean;
+        /** Role and firmware, read with admin rights; only asked when capable. */
+        metadata: boolean;
+      };
       node: FleetNode;
     }>(`/api/nodes/${encodeURIComponent(nodeId)}/refresh`, { method: "POST" }),
 

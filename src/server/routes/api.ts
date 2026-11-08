@@ -462,12 +462,18 @@ export function registerApiRoutes(
         return reply.status(503).send({ error: unavailable });
       }
 
+      // NodeInfo carries a role that lags a role change until the node
+      // restarts, and firmware often declines to answer it at all (once per
+      // requester per 12 hours, and not within 30 minutes of its own last
+      // NodeInfo). Where we hold admin rights, a metadata read answers with
+      // the role and firmware the node is running now.
+      const askMetadata = node.adminCapability === "capable";
       const started = deps.tasks.start({
         kind: "refresh",
         label: "Refreshing device information",
         nodeNum,
         nodeName: node.longName ?? node.shortName ?? null,
-        timeoutSeconds: 25,
+        timeoutSeconds: 25 + (askMetadata ? deps.config.fleet.admin_probe_timeout : 0),
       });
 
       if (!started) {
@@ -476,10 +482,32 @@ export function registerApiRoutes(
       const { task, signal } = started;
 
       try {
-        const received = await deps.enricher.refresh(nodeNum, signal);
+        const answered = await deps.enricher.refresh(nodeNum, signal);
+        let metadata = false;
+        // Skipped when nothing answered: the node is asleep or out of range,
+        // and the read would only sit out its own timeout to say so again.
+        if (askMetadata && (answered.identity || answered.metrics || answered.position)) {
+          try {
+            // Recorded by the ingest, which hears the reply as a metadata packet.
+            await deps.admin.getMetadata(nodeNum, signal);
+            metadata = true;
+          } catch (cause) {
+            if (cause instanceof TaskCancelledError) throw cause;
+            if (cause instanceof AdminError && cause.capability !== "unknown") {
+              deps.nodes.setAdminCapability(nodeNum, cause.capability);
+            }
+            request.log.info(
+              { ...logNode(nodeNum), err: (cause as Error).message },
+              "refresh: metadata read failed",
+            );
+          }
+        }
         // The node row is updated by the ingest as replies land, so read it
         // back rather than reporting what we hoped for.
-        return { received, node: deps.nodes.get(nodeNum) };
+        return {
+          received: { ...answered, metadata },
+          node: deps.nodes.get(nodeNum),
+        };
       } catch (cause) {
         if (cause instanceof TaskCancelledError) {
           return reply.status(409).send({ error: "refresh cancelled" });
@@ -586,8 +614,9 @@ export function registerApiRoutes(
         write: async (signal) => {
           const confirmedBy = await deps.admin.setRole(nodeNum, role.value, signal);
           // Also on "unchanged": the node has just said what it holds, and the
-          // stored role may be the stale one.
-          deps.nodes.upsert({ nodeNum, role: role.value });
+          // stored role may be the stale one. Confirmed, so the NodeInfo it
+          // sends before restarting, still naming the old role, is not believed.
+          deps.nodes.upsert({ nodeNum, role: role.value, roleSource: "config" });
           return { confirmedBy, restarting: confirmedBy !== "unchanged" };
         },
       });

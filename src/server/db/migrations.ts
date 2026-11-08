@@ -236,4 +236,16 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    name: "009_node_role_confirmed_at",
+    sql: `
+      -- When the stored role last came from the node's own configuration (a
+      -- device config or metadata answer, or a confirmed role write) rather
+      -- than from a NodeInfo. NodeInfo carries the role firmware copies into
+      -- its owner record at boot, so it lags a role change until the node
+      -- restarts, and the radio's NodeDB keeps that copy for as long as it
+      -- hears nothing newer. Null: never confirmed, any source may set it.
+      ALTER TABLE nodes ADD COLUMN role_confirmed_at INTEGER;
+    `,
+  },
 ];

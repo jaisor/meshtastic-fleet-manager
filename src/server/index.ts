@@ -12,7 +12,7 @@ import { AdminOperationRepository } from "./db/repositories/adminOperations.js";
 import { AssistantQueryRepository } from "./db/repositories/assistantQueries.js";
 import { Assistant } from "./assistant/index.js";
 import { MeshListener } from "./mesh/listener.js";
-import { attachIngest } from "./mesh/ingest.js";
+import { attachIngest, recordConfigFacts } from "./mesh/ingest.js";
 import { createAdmissionGate, RecentPackets } from "./mesh/admission.js";
 import { MqttFeed } from "./mesh/mqttFeed.js";
 import { AdminClient } from "./mesh/admin.js";
@@ -195,6 +195,8 @@ async function main(): Promise<void> {
     listener,
     logger: app.log,
     timeout: config.fleet.admin_probe_timeout,
+    // The mesh-side repository: the node number here is the real one.
+    onConfig: (nodeNum, answer) => recordConfigFacts(meshNodes, nodeNum, answer),
   });
   admin.attach();
 

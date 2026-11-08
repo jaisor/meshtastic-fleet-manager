@@ -132,6 +132,7 @@ export function NodeDetail({
         received.identity && "identity",
         received.metrics && "metrics",
         received.position && "position",
+        received.metadata && "role and firmware",
       ].filter(Boolean);
       // Say what came back rather than a bare "done": a node that answered
       // nothing looks identical to a successful refresh otherwise.

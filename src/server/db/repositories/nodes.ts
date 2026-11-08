@@ -108,6 +108,26 @@ export interface NodeUpsert {
   longName?: string | null;
   hwModel?: string | null;
   role?: string | null;
+  /**
+   * Where `role` comes from, which decides whether it may replace the stored
+   * one. Firmware keeps the role twice: `config.device.role`, which a write
+   * changes at once, and the owner record's copy that NodeInfo carries, which
+   * is synced from it only at boot (`NodeDB::NodeDB`, checked against
+   * `develop` on 2026-11-08). So:
+   *
+   * - `config`: the node's configuration answered for itself -- a device
+   *   config or metadata reply, or a confirmed role write. Always wins, and
+   *   stamps `role_confirmed_at`.
+   * - `broadcast` (the default): a `User` record the node sent, heard at
+   *   `lastHeardAt`. Wins unless a confirmed role is under
+   *   `ROLE_SETTLE_SECONDS` older, the window in which the node still
+   *   advertises the role it is about to restart out of.
+   * - `cache`: the local radio's NodeDB copy, of unknown age. Fills a role
+   *   that was never confirmed and never replaces one that was: the radio
+   *   keeps replaying it on every connect until it hears a newer NodeInfo,
+   *   which a multi-hop node may not send for hours.
+   */
+  roleSource?: "config" | "broadcast" | "cache";
   firmwareVersion?: string | null;
   publicKey?: Uint8Array | null;
   lastHeardAt?: number | null;
@@ -117,6 +137,16 @@ export interface NodeUpsert {
   batteryLevel?: number | null;
   voltage?: number | null;
 }
+
+/**
+ * How long a NodeInfo is disbelieved after the role was confirmed from the
+ * node's configuration. Firmware restarts about five seconds after a role
+ * write; a NodeInfo sent before that still names the old role. Ten minutes
+ * covers that and a late copy relayed over several hops, and is short enough
+ * that a role changed later from another app is picked up from the node's
+ * next broadcast.
+ */
+export const ROLE_SETTLE_SECONDS = 600;
 
 export interface StaleThresholds {
   staleAfter: number;
@@ -215,6 +245,7 @@ export class NodeRepository {
    * Insert-or-update by node number. Every optional column uses
    * `COALESCE(excluded.x, nodes.x)` so a packet that carries only a
    * position does not blank out a name learned from an earlier NodeInfo.
+   * The role is the exception: see `NodeUpsert.roleSource`.
    */
   upsert(node: NodeUpsert): void {
     this.db
@@ -223,17 +254,33 @@ export class NodeRepository {
         INSERT INTO nodes (
           node_num, short_name, long_name, hw_model, role, firmware_version,
           public_key, first_seen_at, last_heard_at, snr, rssi,
-          hops_away, battery_level, voltage
+          hops_away, battery_level, voltage, role_confirmed_at
         ) VALUES (
           @nodeNum, @shortName, @longName, @hwModel, @role, @firmwareVersion,
           @publicKey, @now, @lastHeardAt, @snr, @rssi,
-          @hopsAway, @batteryLevel, @voltage
+          @hopsAway, @batteryLevel, @voltage,
+          CASE WHEN @role IS NOT NULL AND @roleSource = 'config' THEN @now END
         )
         ON CONFLICT(node_num) DO UPDATE SET
           short_name       = COALESCE(excluded.short_name, nodes.short_name),
           long_name        = COALESCE(excluded.long_name, nodes.long_name),
           hw_model         = COALESCE(excluded.hw_model, nodes.hw_model),
-          role             = COALESCE(excluded.role, nodes.role),
+          -- SET expressions all read the row as it was, so the CASE below
+          -- sees the old role_confirmed_at whatever order these are in.
+          role             = CASE
+                               WHEN excluded.role IS NULL THEN nodes.role
+                               WHEN @roleSource = 'config' THEN excluded.role
+                               WHEN nodes.role_confirmed_at IS NULL THEN excluded.role
+                               WHEN @roleSource = 'broadcast'
+                                AND @roleSeenAt > nodes.role_confirmed_at + @roleSettle
+                                 THEN excluded.role
+                               ELSE nodes.role
+                             END,
+          role_confirmed_at = CASE
+                               WHEN excluded.role IS NOT NULL AND @roleSource = 'config'
+                                 THEN @now
+                               ELSE nodes.role_confirmed_at
+                             END,
           firmware_version = COALESCE(excluded.firmware_version, nodes.firmware_version),
           public_key       = COALESCE(excluded.public_key, nodes.public_key),
           snr              = COALESCE(excluded.snr, nodes.snr),
@@ -254,6 +301,9 @@ export class NodeRepository {
         longName: node.longName ?? null,
         hwModel: node.hwModel ?? null,
         role: node.role ?? null,
+        roleSource: node.roleSource ?? "broadcast",
+        roleSeenAt: node.lastHeardAt ?? nowSeconds(),
+        roleSettle: ROLE_SETTLE_SECONDS,
         firmwareVersion: node.firmwareVersion ?? null,
         publicKey: node.publicKey ? Buffer.from(node.publicKey) : null,
         now: nowSeconds(),

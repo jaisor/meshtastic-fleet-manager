@@ -359,6 +359,9 @@ export class MqttFeed {
           longName: content.longName,
           hwModel: enumName(Protobuf.Mesh.HardwareModel, content.hwModel),
           role: enumName(Protobuf.Config.Config_DeviceConfig_Role, content.role),
+          roleSource: "broadcast",
+          // When the role was heard, for `roleSource`; never moves backwards.
+          lastHeardAt: heardAt,
         });
         return;
 

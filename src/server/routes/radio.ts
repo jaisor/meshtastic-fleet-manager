@@ -181,7 +181,7 @@ export function registerRadioRoutes(
       detail: `role=${role.value}`,
       write: async (nodeNum, signal) => {
         const confirmedBy = await deps.admin.setRole(nodeNum, role.value, signal);
-        deps.nodes.upsert({ nodeNum, role: role.value });
+        deps.nodes.upsert({ nodeNum, role: role.value, roleSource: "config" });
         return { confirmedBy, restarting: confirmedBy !== "unchanged" };
       },
     });

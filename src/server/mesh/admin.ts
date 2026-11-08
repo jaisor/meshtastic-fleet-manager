@@ -117,6 +117,12 @@ export interface AdminClientOptions {
   logger: FastifyBaseLogger;
   /** Seconds to wait for a response before giving up. */
   timeout: number;
+  /**
+   * Every config block a node answers with, whichever read asked for it.
+   * Lets the node's row follow what the node itself reports (its role, its
+   * key) without each caller remembering to copy the fields across.
+   */
+  onConfig?: (nodeNum: number, config: Protobuf.Config.Config) => void;
 }
 
 /**
@@ -391,6 +397,18 @@ export class AdminClient {
         "the node acknowledged the request but sent no data",
         "unknown",
       );
+    }
+    const answer = reply.message.payloadVariant;
+    if (answer.case === "getConfigResponse" && this.options.onConfig) {
+      try {
+        this.options.onConfig(nodeNum, answer.value);
+      } catch (cause) {
+        // Recording is a side effect; the caller still gets its answer.
+        this.options.logger.warn(
+          { ...logNode(nodeNum), err: (cause as Error).message },
+          "could not record a config answer",
+        );
+      }
     }
     return reply.message;
   }

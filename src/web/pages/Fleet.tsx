@@ -107,6 +107,7 @@ export function Fleet({
         received.identity && "identity",
         received.metrics && "metrics",
         received.position && "position",
+        received.metadata && "role and firmware",
       ].filter(Boolean);
       // Say what came back: a node that answered nothing would otherwise
       // look exactly like one that did.

@@ -955,6 +955,26 @@ bloom over near-black.
   nothing, and corrects the stored value. Unlike `setLoRa`, the write goes through
   `confirmWrite`, because the node comes back on the same channel and can answer a read-back.
   Gated in the UI on a `capable` verdict like the names; the server gates on role and radio.
+- **The stored role follows the node's configuration, not its NodeInfo**
+  (`NodeUpsert.roleSource`, `nodes.role_confirmed_at`, `ingest.ts:recordConfigFacts`).
+  Firmware keeps the role twice: `config.device.role`, which a write changes at once and
+  which `DeviceMetadata` reports, and the owner record's copy that NodeInfo carries, synced
+  from it only at boot (`NodeDB::NodeDB`, checked against `develop` on 2026-11-08). The
+  radio's NodeDB then replays that copy on every connect until it hears a newer NodeInfo,
+  and firmware declines most NodeInfo requests (once per requester per 12h, and not within
+  ~30 min of its own last one). With a plain `COALESCE` every reconnect put the old role
+  back, and no refresh or query could correct it. So a role has a source:
+  `config` (device config or metadata answer, confirmed write) always wins and stamps
+  `role_confirmed_at`; `broadcast` (a `User` record, including an owner read) wins unless a
+  confirmed role is under `ROLE_SETTLE_SECONDS` (10 min) older; `cache` (the NodeDB dump)
+  only fills a role never confirmed. **Every config answer updates the row**: `AdminClient`
+  hands each `getConfigResponse` to `onConfig`, which records the role from a device block
+  and the public key from a security block, so the settings read, the raw query, a role
+  write's own reads and the local read-back all agree with what the node said. The local
+  USB dump does the same. Metadata answers also record the hardware model. Refresh adds a
+  metadata read on a `capable` node that answered anything, since NodeInfo alone cannot
+  report a role change. Names are not given this treatment: firmware updates the owner
+  record at once on a rename and re-broadcasts it, so only the radio's cache can lag there.
 - **The raw configuration view** (`mesh/rawConfig.ts`, `node_raw_config`,
   `components/RawConfig.tsx`) shows what the node answers as JSON, 24 sections and up to 31
   reads. Querying a remote node is manager and admin, a cancellable task under the radio lock;
@@ -1402,6 +1422,14 @@ at 1280px and 390px, each role: the editor, its two steps, the cost following th
 each role is shown, no overflow, no console or HTTP errors. **Not verified**: any of it against
 real firmware, above all the reboot after a role change, how the ACK fares against it, and how
 long a real 31-read query takes over several hops.
+
+**Role provenance is verified against the real repository and a stub radio**
+(2026-11-08): on a temporary database, a NodeDB-dump role fills an unconfirmed node; a
+device config answer, through a real `AdminClient` round trip in `readRadioConfig` and in a
+bare `getConfig`, corrects a stale role and stamps it; a later dump does not revert it; a
+NodeInfo inside the settle window is ignored and one after it is believed; names and other
+fields still coalesce; a security answer records the key. *Not* verified: the refresh's
+metadata read, and anything against real firmware.
 
 **Not verified, and the first things to check with hardware in hand:**
 
