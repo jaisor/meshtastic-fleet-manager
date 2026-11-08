@@ -134,6 +134,7 @@ src/server/
   index.ts                   bootstrap, wiring, graceful shutdown
   config.ts                  YAML load + zod validation + scrypt password hashing
   auth.ts                    session store, login routes, requireSession hook
+  mock.ts                    mock mode: id mapping, pseudonyms, masked repositories, status scrub
   assistant/index.ts         question -> LLM -> FleetQuery; providers, budget, error mapping
   db/
     index.ts                 connection, pragmas (WAL), migration runner
@@ -177,7 +178,9 @@ src/web/
 Keep the mesh layer free of HTTP concerns and the routes free of protobuf concerns. The
 mesh-derived tables have exactly two writers: `ingest.ts` (the radio) and `mqttFeed.ts`
 (the broker). Both go through one `AdmissionGate` and one `RecentPackets`, created in
-`index.ts`; a third source must too.
+`index.ts`; a third source must too. **Mesh modules get `meshNodes` / `meshChannels`,
+routes get `nodes` / `channels`** — the same objects normally, different ones in mock
+mode (§11). A new mesh-side writer must take the `mesh*` pair.
 
 **Migrations live in TypeScript, not `.sql` files.** `db/migrations.ts` exports an ordered
 array of `{name, sql}`. That keeps `dist/` a pure compiled tree with no asset-copy step in
@@ -1162,6 +1165,34 @@ bloom over near-black.
     (firmware derives it from the channel name), and with preset mode off it prints
     `custom BW/SF/CR`, since the preset field is then stale. The line is built from what is
     stored after the read, so a part the radio did not answer falls back to the config dump.
+- **Mock mode** (`mock.ts`, `mock:` in config) serves a mock database with the real
+  radio attached, for screenshots. It is read-only toward the mesh and keeps every real
+  identity out of the database and the API.
+  **The seam is the mesh side's repositories, not the repositories themselves.** Mesh
+  modules speak real node numbers and routes speak stored ones, so `MockedNodeRepository`
+  (translates every node number, strips names/key/hardware/role from a mapped node,
+  pseudonymizes the rest, relocates or drops positions) and `MockedChannelRepository`
+  (never writes) are handed only to the ingest, the broker feed, the admission gate, the
+  connect-time radio read, the enricher and the prober. Translating inside the shared
+  repository would translate a route's mock number a second time.
+  **Routes see a `RadioLink`, not the listener.** In mock mode `mockRadioLink` reports the
+  real status with the local number translated and the port path replaced, and its
+  `unavailableReason` returns `MOCK_REFUSAL` while the radio is up, so every radio route
+  answers 503 through the gate it already has. The header still reads connected. The
+  watchdog and MQTT statuses are wrapped the same way (ids in text, broker URL, host,
+  topics). The prober and the enricher do not run; the watchdog does (USB only).
+  **Pseudonyms are an HMAC of the real number under `mock.secret`**, so they are stable
+  across restarts and a 32-bit node number cannot be brute-forced back out of the
+  database. Startup refuses when the database holds any real node from `mock.nodes`,
+  i.e. mock mode pointed at the real database. **Logs are not masked.**
+  Verified (2026-10-13) with the real ingest over a copy of the mock database and a fake
+  radio sending real ids, names, key and coordinates: mapped nodes keep their mock
+  identity while live state flows, an unknown node gets a stable pseudonym and derived
+  key, positions are relocated (dropped without `relocate`, altitude always), the
+  channel table is untouched, no real number or string reaches `nodes` or `positions`,
+  and the link refuses operations while connected. Over HTTP: the four bad configs and
+  the real database refuse to start, and the status shows only the replacement port,
+  broker, host and topics. *Not* verified with a real radio attached.
 - **Imports:** double-quoted, `import type` for types (`verbatimModuleSyntax` is on).
   `noUnusedLocals` / `noUnusedParameters` are on — dead variables fail the build.
 - The web build sets `erasableSyntaxOnly`, which **forbids constructor parameter

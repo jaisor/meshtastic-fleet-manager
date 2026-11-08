@@ -21,7 +21,15 @@ import { CapabilityProber } from "./mesh/capability.js";
 import { NodeEnricher } from "./mesh/enrich.js";
 import { RadioTaskRegistry } from "./mesh/tasks.js";
 import { RadioWatchdog } from "./mesh/watchdog.js";
-import { logNode } from "./mesh/nodeId.js";
+import { logNode, toNodeId } from "./mesh/nodeId.js";
+import {
+  MockedChannelRepository,
+  MockedNodeRepository,
+  MockIdentities,
+  mockMqtt,
+  mockRadioLink,
+  mockWatchdog,
+} from "./mock.js";
 import { registerAuthRoutes, requireSession, SessionStore } from "./auth.js";
 import { UserRepository } from "./db/repositories/users.js";
 import { registerApiRoutes } from "./routes/api.js";
@@ -80,19 +88,57 @@ async function main(): Promise<void> {
     enabled: config.serial.enabled,
     logger: app.log,
   });
+  const mock = config.mockMode;
+  const ids = mock ? new MockIdentities(mock) : null;
+  const thresholds = {
+    staleAfter: config.fleet.stale_after,
+    offlineAfter: config.fleet.offline_after,
+  };
   // Which node is the local radio comes from the live link, never the
-  // database, so a row cannot outlive the radio it describes.
-  const nodes = new NodeRepository(
-    db,
-    {
-      staleAfter: config.fleet.stale_after,
-      offlineAfter: config.fleet.offline_after,
-    },
-    () => listener.getStatus().localNodeNum,
-  );
+  // database, so a row cannot outlive the radio it describes. Translated in
+  // mock mode, since the rows it is compared with are stored numbers.
+  const localNodeNum = (): number | null => {
+    const real = listener.getStatus().localNodeNum;
+    return real === null || !ids ? real : ids.nodeNum(real);
+  };
+  // `nodes` and `channels` take stored node numbers and serve the routes.
+  // `meshNodes` and `meshChannels` take the real numbers the radio and the
+  // broker report; in mock mode they translate and scrub on the way in.
+  const nodes = new NodeRepository(db, thresholds, localNodeNum);
+  const channels = new ChannelRepository(db);
+  const meshNodes = ids
+    ? new MockedNodeRepository(db, thresholds, localNodeNum, ids)
+    : nodes;
+  const meshChannels = ids ? new MockedChannelRepository(db) : channels;
   const operations = new AdminOperationRepository(db);
   const users = new UserRepository(db);
-  const channels = new ChannelRepository(db);
+
+  if (mock) {
+    // The point of mock mode is a database with no real node in it. One that
+    // has them is the real database, and serving it would show exactly what
+    // mock mode is meant to hide.
+    const real = [...mock.nodes.keys()].filter((num) => nodes.exists(num));
+    if (real.length > 0) {
+      app.log.fatal(
+        { database: config.database.path, realNodes: real.map(toNodeId) },
+        "mock mode is on but the database holds real nodes from mock.nodes; " +
+          "point database.path at the mock database",
+      );
+      process.exit(1);
+    }
+    const missing = [...mock.nodes.values()].filter((num) => !nodes.exists(num));
+    if (missing.length > 0) {
+      app.log.warn(
+        { missing: missing.map(toNodeId) },
+        "mock.nodes maps onto nodes the database does not have; they will appear unnamed",
+      );
+    }
+    app.log.warn(
+      { mapped: mock.nodes.size, relocate: mock.relocate !== null },
+      "mock mode: real nodes are mapped or pseudonymized before they are stored, " +
+        "and every radio operation is refused",
+    );
+  }
 
   // Anything still pending belongs to a previous process and has no waiter.
   const abandoned = operations.failAllPending("interrupted by server restart");
@@ -111,19 +157,20 @@ async function main(): Promise<void> {
       ),
   });
 
+  // Off in mock mode: it transmits.
   const enricher = new NodeEnricher({
     listener,
-    nodes,
+    nodes: meshNodes,
     tasks,
     logger: app.log,
-    enabled: config.discovery.probe_new_nodes,
+    enabled: config.discovery.probe_new_nodes && !mock,
   });
 
   // One gate and one memory of recent packets for both sources, so a node
   // admitted by either is a member for both, and a packet heard by the radio
   // and uplinked by three gateways is recorded once.
   const admitted = createAdmissionGate({
-    nodes,
+    nodes: meshNodes,
     rules: config.discoveryRules,
     logger: app.log,
     localNodeNum: () => listener.getStatus().localNodeNum,
@@ -131,13 +178,13 @@ async function main(): Promise<void> {
   });
   const recent = new RecentPackets();
 
-  attachIngest(listener, nodes, channels, admitted, recent, app.log);
+  attachIngest(listener, meshNodes, meshChannels, admitted, recent, app.log);
 
   const mqtt = config.broker
     ? new MqttFeed({
         config: config.broker,
         rules: config.discoveryRules,
-        nodes,
+        nodes: meshNodes,
         admitted,
         recent,
         logger: app.log,
@@ -154,7 +201,13 @@ async function main(): Promise<void> {
   // Reads the USB radio back in full each time it finishes its config dump,
   // so a radio that streams but will not answer admin requests is caught at
   // connect rather than at the first save on the Radio page.
-  new LocalRadioProbe({ listener, admin, nodes, channels, logger: app.log }).attach();
+  new LocalRadioProbe({
+    listener,
+    admin,
+    nodes: meshNodes,
+    channels: meshChannels,
+    logger: app.log,
+  }).attach();
 
   // A task waiting on a radio that just vanished will never be answered;
   // abandon them so the banner clears instead of hanging until timeout.
@@ -166,7 +219,7 @@ async function main(): Promise<void> {
   });
 
   const prober = new CapabilityProber({
-    nodes,
+    nodes: meshNodes,
     admin,
     listener,
     tasks,
@@ -242,15 +295,15 @@ async function main(): Promise<void> {
       config,
       nodes,
       operations,
-      listener,
+      listener: mock && ids ? mockRadioLink(listener, ids, mock) : listener,
       admin,
       prober,
       tasks,
       auth,
       enricher,
-      watchdog,
+      watchdog: watchdog && ids ? mockWatchdog(watchdog, ids) : watchdog,
       assistant,
-      mqtt,
+      mqtt: mqtt && mock && ids ? mockMqtt(mqtt, ids, mock) : mqtt,
     };
     registerApiRoutes(scope, apiDeps);
     registerAssistantRoutes(scope, { auth, assistant });
@@ -262,7 +315,8 @@ async function main(): Promise<void> {
 
   if (config.serial.enabled) {
     listener.start();
-    prober.start();
+    // The sweep transmits, so mock mode leaves it off.
+    if (!mock) prober.start();
     watchdog?.start();
   } else {
     app.log.warn("serial.enabled is false; running without a radio");

@@ -333,3 +333,49 @@ llm:
 
 logging:
   level: info
+
+# Mock mode, for screenshots and demos: serve a mock database while the real
+# radio (and broker) stay attached, so the console looks live without showing
+# a single real identity. Point database.path at the mock database first; a
+# database holding any real node named under `nodes` refuses to start.
+#
+# While it is on:
+#   - A real node listed under `nodes` appears as that mock node. It keeps the
+#     mock node's names, key, hardware and role; only its live state (last
+#     heard, signal, hops, battery, telemetry) comes through.
+#   - Any other node appears under a pseudonym, "Meshtastic 3fa1", with a node
+#     number and key derived from `secret`. Stable across restarts, and not
+#     reversible from the database.
+#   - The local radio's channel table is never written; the mock's rows stand.
+#   - Every operation that would use the radio answers 503, and the admin
+#     sweep and new-node requests do not run. Nothing is transmitted.
+#   - The serial port path and the broker's address and topics are replaced
+#     in the status shown to the browser.
+#   - Logs are NOT masked. They carry real ids, as always.
+mock:
+  enabled: false
+
+  # Required when enabled. Keys the pseudonyms: change it and every unmapped
+  # node reappears under a new one.
+  # secret: "a long random string"
+
+  # Real node id -> the mock node it appears as. Keep this file private: it
+  # is the one place the real ids are written down.
+  nodes: {}
+  #   "!a4c138f0": "!7fc39573"
+
+  # Where live positions go. Without it they are dropped, which is the safe
+  # default: a position is the most identifying thing a node reports. Points
+  # are moved from `from` to `to`, rotated `rotate` degrees counterclockwise
+  # and scaled by `scale`, so the real layout cannot be laid over a map.
+  # Altitude is always dropped.
+  # relocate:
+  #   from: { lat: 0.0, lon: 0.0 }
+  #   to: { lat: 44.0582, lon: -121.3153 }
+  #   rotate: 127
+  #   scale: 1.35
+
+  # Shown in place of the real serial port and broker.
+  port_path: /dev/ttyUSB0
+  mqtt_url: mqtt://broker.example.net:1883
+  mqtt_topics: ["msh/US/2/json/#"]

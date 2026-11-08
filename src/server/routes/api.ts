@@ -8,7 +8,7 @@ import {
   type AdminClient,
 } from "../mesh/admin.js";
 import type { CapabilityProber } from "../mesh/capability.js";
-import type { MeshListener } from "../mesh/listener.js";
+import type { RadioLink } from "../mesh/listener.js";
 import { TaskCancelledError, type RadioTaskRegistry } from "../mesh/tasks.js";
 import { describeRules, isRestricted } from "../mesh/discovery.js";
 import { requireCapability, type AuthContext } from "../auth.js";
@@ -73,18 +73,19 @@ export interface ApiDependencies {
   config: AppConfig;
   nodes: NodeRepository;
   operations: AdminOperationRepository;
-  listener: MeshListener;
+  /** In mock mode a stand-in that refuses every operation; see `mock.ts`. */
+  listener: RadioLink;
   admin: AdminClient;
   prober: CapabilityProber;
   tasks: RadioTaskRegistry;
   auth: AuthContext;
   enricher: NodeEnricher;
   /** Null when `watchdog.enabled` or `serial.enabled` is off. */
-  watchdog: RadioWatchdog | null;
+  watchdog: Pick<RadioWatchdog, "getStatus"> | null;
   /** Null when `llm.enabled` is off. */
   assistant: Assistant | null;
   /** Null when `mqtt.enabled` is off. */
-  mqtt: MqttFeed | null;
+  mqtt: Pick<MqttFeed, "getStatus"> | null;
 }
 
 export function registerApiRoutes(

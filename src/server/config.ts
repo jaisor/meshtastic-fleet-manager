@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { parseNodeId } from "./mesh/nodeId.js";
 
 /**
  * Loads and validates the mounted YAML config. A fleet manager that starts
@@ -228,6 +229,31 @@ const schema = z.object({
         .default("info"),
     })
     .prefault({}),
+  /**
+   * Mock mode, for screenshots and demos: serve a mock database with the real
+   * radio attached, and keep every real identity out of it. See `mock.ts`.
+   */
+  mock: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** Keys the pseudonyms. Required when enabled; change it and they change. */
+      secret: z.string().min(16).optional(),
+      /** Real node id -> the mock node it appears as, both in any id form. */
+      nodes: z.record(z.string(), z.string()).default({}),
+      /** Absent: live positions are dropped rather than stored. */
+      relocate: z
+        .object({
+          from: z.object({ lat: z.number(), lon: z.number() }),
+          to: z.object({ lat: z.number(), lon: z.number() }),
+          rotate: z.number().default(0),
+          scale: z.number().positive().default(1),
+        })
+        .optional(),
+      port_path: z.string().min(1).default("/dev/ttyUSB0"),
+      mqtt_url: z.string().min(1).default("mqtt://broker.example.net:1883"),
+      mqtt_topics: z.array(z.string().min(1)).min(1).default(["msh/US/2/json/#"]),
+    })
+    .prefault({}),
 });
 
 /** Discovery rules, normalized from the YAML into what the ingest needs. */
@@ -251,6 +277,23 @@ export interface MqttConfig {
   clientId: string;
   rejectUnauthorized: boolean;
   logMessages: boolean;
+}
+
+/** The `mock` section, resolved: ids parsed, the secret moved out of `mock`. */
+export interface MockConfig {
+  secret: string;
+  /** Real node number -> mock node number. */
+  nodes: Map<number, number>;
+  relocate: {
+    from: { lat: number; lon: number };
+    to: { lat: number; lon: number };
+    /** Degrees, counterclockwise. */
+    rotate: number;
+    scale: number;
+  } | null;
+  portPath: string;
+  mqttUrl: string;
+  mqttTopics: string[];
 }
 
 export type LlmProvider = "google" | "anthropic" | "openai" | "openai_compatible";
@@ -293,6 +336,8 @@ export type AppConfig = z.infer<typeof schema> & {
   assistant: AssistantConfig | null;
   /** Null when `mqtt.enabled` is off. */
   broker: MqttConfig | null;
+  /** Null when `mock.enabled` is off. */
+  mockMode: MockConfig | null;
   /**
    * Resolved at load time; never the plaintext from the file. Null only with
    * auth disabled and no password set, in which case nobody signs in at all.
@@ -387,6 +432,9 @@ export function loadConfig(path: string): AppConfig {
   const broker = config.mqtt.enabled ? resolveBroker(config.mqtt) : null;
   config.mqtt.password = undefined;
 
+  const mockMode = config.mock.enabled ? resolveMock(config.mock) : null;
+  config.mock.secret = undefined;
+
   return {
     ...config,
     passwordHash,
@@ -394,6 +442,48 @@ export function loadConfig(path: string): AppConfig {
     discoveryRules,
     assistant,
     broker,
+    mockMode,
+  };
+}
+
+/**
+ * Turns the `mock` section into what `mock.ts` needs, or refuses to start.
+ *
+ * A mapping that cannot be read is fatal rather than skipped: the node it
+ * names would otherwise appear under a pseudonym, which looks like a working
+ * mapping until someone notices a stranger in the screenshot.
+ */
+function resolveMock(mock: z.infer<typeof schema>["mock"]): MockConfig {
+  if (!mock.secret) {
+    throw new ConfigError(
+      "mock.secret is required when mock.enabled is true: it keys the pseudonyms, " +
+        "so without a fixed one every restart would rename every unmapped node",
+    );
+  }
+  const nodes = new Map<number, number>();
+  const targets = new Set<number>();
+  for (const [real, fake] of Object.entries(mock.nodes)) {
+    const from = parseNodeId(real);
+    const to = parseNodeId(fake);
+    if (from === null || to === null) {
+      throw new ConfigError(
+        `mock.nodes: "${real}: ${fake}" is not a pair of node ids like !a4c138f0`,
+      );
+    }
+    // Two real nodes on one mock node would merge their history into one row.
+    if (targets.has(to)) {
+      throw new ConfigError(`mock.nodes: ${fake} is the target of more than one node`);
+    }
+    targets.add(to);
+    nodes.set(from, to);
+  }
+  return {
+    secret: mock.secret,
+    nodes,
+    relocate: mock.relocate ?? null,
+    portPath: mock.port_path,
+    mqttUrl: mock.mqtt_url,
+    mqttTopics: mock.mqtt_topics,
   };
 }
 

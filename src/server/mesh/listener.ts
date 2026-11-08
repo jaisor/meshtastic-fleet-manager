@@ -45,6 +45,15 @@ export interface ListenerOptions {
   logger: FastifyBaseLogger;
 }
 
+/**
+ * What the HTTP routes may see of the listener: its status, and whether the
+ * radio can be used. Narrow so mock mode can stand in for it (`mock.ts`).
+ */
+export type RadioLink = Pick<
+  MeshListener,
+  "getStatus" | "getIdentifiedDevice" | "unavailableReason"
+>;
+
 export class MeshListener extends EventEmitter {
   private device: MeshDevice | null = null;
   private transport: TransportNodeSerial | null = null;
@@ -79,7 +88,10 @@ export class MeshListener extends EventEmitter {
     this.status.enabled = options.enabled;
   }
 
-  /** Everything but the watchdog's half, which the watchdog reports itself. */
+  /**
+   * Everything but the watchdog's half, which the watchdog reports itself.
+   * Part of `RadioLink`, so anything added here is visible to the routes.
+   */
   getStatus(): Omit<RadioStatus, "watchdog"> {
     return { ...this.status };
   }
